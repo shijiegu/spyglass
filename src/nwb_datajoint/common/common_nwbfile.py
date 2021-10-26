@@ -407,30 +407,52 @@ class AnalysisNwbfile(dj.Manual):
 
         # also check to see whether there are directories in the spikesorting folder with this
 
-
 @schema
-class NwbfileKachery(dj.Computed):
+class KacheryChannel(dj.Manual):
     definition = """
-    -> Nwbfile
-    ---
-    nwb_file_uri: varchar(200)  # the uri the NWB file for kachery
+    channel_name: varchar(200) # the name of the kachery channel
     """
 
-    def make(self, key):
+@schema
+class NwbfileKacherySelection(dj.Manual):
+    definition = """
+    -> Nwbfile
+    -> KacheryChannel
+    """
+
+@schema
+class NwbfileKachery(dj.Manual):
+    definition = """
+    -> NwbfileKacherySelection
+     ---
+    nwb_file_uri: varchar(200)  # the uri the NWB file for kachery
+    nwb_file_link_uri='' : varchar(200) # the uri of the linked raw data file
+    """
+
+    def make(self, key): 
         print(f'Linking {key["nwb_file_name"]} and storing in kachery...')
         key['nwb_file_uri'] = kc.link_file(Nwbfile().get_abs_path(key['nwb_file_name']))
         self.insert1(key)
-
+        #TODO: Add linked file?
 
 @schema
-class AnalysisNwbfileKachery(dj.Computed):
+class AnalysisNwbfileKacherySelection(dj.Manual):
     definition = """
     -> AnalysisNwbfile
-    ---
-    analysis_file_uri: varchar(200)  # the uri of the file
+    -> KacheryChannel
     """
 
-    def make(self, key):
+@schema
+class AnalysisNwbfileKachery(dj.Manual):
+    definition = """
+    -> AnalysisNwbfileKacherySelection
+    ---
+    analysis_file_uri: varchar(200)  # the uri of the file
+    analysis_file_link_uri='': varchar(200)  # the uri of an optional linked file
+    """
+
+    def add(self, key):
         print(f'Linking {key["analysis_file_name"]} and storing in kachery...')
         key['analysis_file_uri'] = kc.link_file(AnalysisNwbfile().get_abs_path(key['analysis_file_name']))
         self.insert1(key)
+        #TODO: Add linked file?
