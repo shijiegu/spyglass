@@ -1,5 +1,5 @@
-# Reorganize this into hierarchy
-# Note: users will have their own tables... permission system
+
+# Note: users will have their own tables
 from .common_behav import (HeadDir, LinPos, PositionSource, RawPosition, Speed,
                            StateScriptFile, VideoFile)
 from .common_device import CameraDevice, DataAcquisitionDevice, Probe
@@ -16,9 +16,10 @@ from .common_interval import (IntervalList, SortInterval,
                               interval_list_censor, 
                               interval_list_union)
 from .common_lab import Institution, Lab, LabMember, LabTeam
-from .common_nwbfile import (AnalysisNwbfile, AnalysisNwbfileKachery, Nwbfile,
-                             NwbfileKachery)
-from .common_region import BrainRegion
+from .common_nwbfile import (Nwbfile, AnalysisNwbfile, 
+                             KacheryChannel, NwbfileKacherySelection, AnalysisNwbfileKacherySelection,
+                             NwbfileKachery, AnalysisNwbfileKachery) 
+from .common_region import BraiRegion
 from .common_sensors import SensorData
 from .common_session import ExperimenterList, Session
 from .common_spikesorting import (SortGroup, SpikeSortingFilterParameters, SpikeSortingArtifactDetectionParameters,
