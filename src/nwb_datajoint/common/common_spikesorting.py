@@ -1399,7 +1399,7 @@ class AutomaticCuration(dj.Computed):
             metrics_recording = se.CacheRecordingExtractor(recording, save_path=tmpfile.name, chunk_mb=10000)
             metrics = SpikeSortingMetricParameters().compute_metrics(cluster_metrics_list_name, metrics_recording, sorting)
 
-        # add labels to the sorting based on metrics?
+        # add labels to the sorting based on metrics
         if 'noise_reject' in acpd:
                 if acpd['noise_reject']:
                     # get the noise rejection parameters
@@ -1407,7 +1407,10 @@ class AutomaticCuration(dj.Computed):
                     # Reject everything above hard threshold
                     # TODO make more flexible
                     noise_reject_units = self.thresh_noise_overlap(metrics['noise_overlap'], param_dict=noise_reject_param)
-                    #TODO write noise/ rejection code
+                    label_action = {'type' : 'ADD_UNIT_LABEL',
+                                    'unitId' : noise_reject_units,
+                                    'label' : 'noise'}
+                    # workspace.add_sorting_curation_action(sorting_id, label_action)
         if 'isi_violation' in acpd:
             if acpd['isi_violation']:
                 isi_violation_param = acpd['isi_violation_param']
@@ -1443,7 +1446,7 @@ class AutomaticCuration(dj.Computed):
                     threshold = param_dict['threshold']
         valid_noise_overlap = np.zeros_like(noise_overlap, dtype=bool)
         valid_noise_overlap[np.where(noise_overlap<0.03)] = True
-
+        pdb.set_trace()
         return valid_noise_overlap
 
     def compute_isi_violations(self, key, spike_times=None, param_dict=None, refractory_period=2/1000, exclusion_window=10/30000, spike_to_isi_ratio_threshold=400, verbose=False):
