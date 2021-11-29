@@ -1,4 +1,4 @@
-from copy import Error
+from copy import Error, copy
 import json
 import os
 import pathlib
@@ -7,6 +7,7 @@ import tempfile
 import time
 from pathlib import Path
 import shutil
+import pdb
 
 import datajoint as dj
 import kachery_client as kc
@@ -1161,7 +1162,9 @@ class ModifySorting(dj.Computed):
     #     labels = dict()
     #     labels['mergeGroups'] = []
     #     # format: labels['mergeGroups'] = [[1, 2, 5], [3, 4]] would merge units 1,2,and 5 and, separately, 3 and4
-    #     labels['labelsByUnit'] = dict()
+    # if ''    
+    # 
+    # labels['labelsByUnit'] = dict()
     #     # format: labels['labelsByUnit'] = {1:'accept', 2:'noise,reject'}] would label unit 1 as 'accept' and unit 2 as 'noise' and 'reject'
 
     #     # List of available functions for spike waveform extraction:
@@ -1331,6 +1334,10 @@ class AutomaticCurationParameters(dj.Manual):
         param_dict['burst_merge_param'] = dict()
         param_dict['noise_reject'] = False
         param_dict['noise_reject_param'] = dict()
+        param_dict['isi_violation'] = False
+        param_dict['isi_violation_param'] = dict()
+        param_dict['misaligned_waveform'] = False
+        param_dict['misaligned_waveform_param'] = dict()
         return param_dict
 
 @schema
@@ -1372,8 +1379,8 @@ class AutomaticCuration(dj.Computed):
         workspace = sv.load_workspace(workspace_uri)
         sorting = workspace.get_sorting_extractor(sorting_id)
         recording = workspace.get_recording_extractor(workspace.recording_ids[0])
-
-        auto_curate_param_name = (AutomaticCurationSelection & key).fetch1('automatic_curation_parameter_set_name')
+        orig_recording = copy(recording)
+        auto_curate_param_name = (AufiltertomaticCurationSelection & key).fetch1('automatic_curation_parameter_set_name')
         acpd = (AutomaticCurationParameters & {'automatic_curation_parameter_set_name': auto_curate_param_name}).fetch1('automatic_curation_parameter_dict')
         # check for defined automatic curation keys / parameters
 
@@ -1382,7 +1389,6 @@ class AutomaticCuration(dj.Computed):
 
         # get the cluster metrics list name and add a name for this sorting
         cluster_metrics_list_name = (AutomaticCurationSelection & key).fetch1('cluster_metrics_list_name')
-
         # 2. Calculate the metrics
         #First, whiten the recording
         with Timer(label=f'whitening and computing new quality metrics', verbose=True):
@@ -1398,8 +1404,23 @@ class AutomaticCuration(dj.Computed):
                 if acpd['noise_reject']:
                     # get the noise rejection parameters
                     noise_reject_param = acpd['noise_reject_param']
+                    # Reject everything above hard threshold
+                    # TODO make more flexible
+                    noise_reject_units = self.thresh_noise_overlap(metrics['noise_overlap'], param_dict=noise_reject_param)
                     #TODO write noise/ rejection code
-
+        if 'isi_violation' in acpd:
+            if acpd['isi_violation']:
+                isi_violation_param = acpd['isi_violation_param']
+                isi_violation_units = self.compute_isi_violations(
+                                                key, 
+                                                param_dict=isi_violation_param)
+        if 'misaligned_waveform' in acpd:
+            if acpd['misaligned_waveform']:
+                misaligned_waveform_param = acpd['misaligned_waveform_param']
+                misaligned_waveform_units = self.compute_waveform_misalignment(
+                                                orig_recording, sorting, 
+                                                param_dict=misaligned_waveform_param)
+        raise Exception
         # Store the sorting with metrics in the NWB file and update the metrics in the workspace
         sort_interval_list_name = (SpikeSortingRecording & key).fetch1('sort_interval_list_name')
 
@@ -1412,7 +1433,194 @@ class AutomaticCuration(dj.Computed):
 
         SpikeSortingWorkspace().add_metrics_to_sorting(key, sorting_id=sorting_id, metrics=metrics)
         self.insert1(key)
+    
+    def thresh_noise_overlap(self, noise_overlap, param_dict=None, threshold=0.03):
+        if isinstance(noise_overlap, pd.Series):
+            noise_overlap = noise_overlap.to_numpy()
+        if param_dict is not None:
+            if 'threshold' in param_dict:
+                if param_dict['threshold']:
+                    threshold = param_dict['threshold']
+        valid_noise_overlap = np.zeros_like(noise_overlap, dtype=bool)
+        valid_noise_overlap[np.where(noise_overlap<0.03)] = True
 
+        return valid_noise_overlap
+
+    def compute_isi_violations(self, key, spike_times=None, param_dict=None, refractory_period=2/1000, exclusion_window=10/30000, spike_to_isi_ratio_threshold=400, verbose=False):
+        """
+        NOTE: THE EXCLUSION WINDOW FOR CALCULATING ISI VIOLATIONS DEFAULTS TO 10/30000, THE DEFAULT detect_interval
+            FOR MOUNTAINSORT4 SPIKE SORTING ON HIPPOCAMPAL DATA ACQUIRED AT 30000 SAMPLES PER SECOND.
+        
+        Find all spike pairs whose time differences are less than refractory_period but greater than exclusion_window and
+        return these time differences. A given spike is only compared to the one spike following it.
+        
+        Parameters
+        ----------
+            spike_times: list
+                A list of all spike times for each cluster.
+            
+            refractory_period: float, Optional
+                Maximum spike time separation between spike pairs in seconds.
+                Default: 2/1000
+            
+            exclusion_window: float, Optional
+                Minimum spike time separation between spike pairs in seconds. Spike pairs separated by a time less than
+                exclusion_window are ignored. This value should equal the minimum peak separation used for spike sorting.
+                Default: 10/30000
+                    
+            verbose: boolean, Optional
+                Print debugging and timing information.
+                Default: False
+                
+        Returns
+        -------
+            isi_violations_list: list
+                Length K list of time differences between identified spike pairs. The number of clusters is K, and each
+                entry is a length N list of spike pair time differences.
+        """
+        if verbose:
+            time_start = time.time()
+        if param_dict is not None:
+            if 'refractory_period' in param_dict:
+                if param_dict['refractory_period']:
+                    refractory_period = param_dict['refractory_period']
+            if 'exclusion_window' in param_dict:
+                if param_dict['exclusion_window']:
+                    exclusion_window = param_dict['exclusion_window']
+            if 'spike_to_isi_ratio' in param_dict:
+                if param_dict['spike_to_isi_ratio']:
+                    spike_to_isi_ratio = param_dict['spike_to_isi_ratio']
+        if spike_times is None:
+            spike_times = (SpikeSorting() & key).fetch_nwb()[0]['units']['spike_times'].to_numpy()
+        n_clusters = len(spike_times)
+        isi_violations_list = [None]*n_clusters
+        for cluster in range(n_clusters):
+            spikes = spike_times[cluster]
+            n_spikes = len(spike_times[cluster])
+            isi_violations_list[cluster] = np.full(n_spikes, False)
+            # Calculate the interspike time intervals
+            isi_times = np.diff(spikes)
+            # Keep interspike intervals that lie in [exclusion_window, refractory_period]
+            isi_violations_list[cluster][1:] = np.logical_and(isi_times <= refractory_period, isi_times >= exclusion_window)
+        spike_counts = np.array([len(cluster_spikes) for cluster_spikes in spike_times])
+        isi_violation_counts = np.array([np.sum(cluster_isi) for cluster_isi in isi_violations_list])
+        valid_isi_ind = (isi_violation_counts <= spike_counts/spike_to_isi_ratio_threshold)
+        #TODO: can implement zero_ind as part of metric
+        zero_ind = (isi_violation_counts == 0)
+        if verbose:
+            time_end = time.time()
+            print( "Computed ISI violations for %d clusters, %.3f ms to %.3f ms time window" % (n_clusters, 1000*exclusion_window, 1000*refractory_period) )
+            print( "%.6f seconds elapsed" % (time_end-time_start) ) 
+            for cluster in range(n_clusters):
+                print( "\tCluster %d:\t%d ISI violations out of %d spikes" % (cluster+1, np.sum(isi_violations_list[cluster]), len(spike_times[cluster])) )
+            print()
+        
+        return valid_isi_ind
+    
+    def compute_waveform_misalignment(self, recording, sorting, param_dict=None, waveforms=None, channel_list=None, waveform_center_idx=None, direction='down', min_amp_ratio_threshold=[1, 1], max_amp_ratio_threshold=[0.8, np.inf], verbose=False):
+            
+        if verbose:
+            time_start = time.time()
+
+        if param_dict is not None:
+            if 'waveform_center_idx' in param_dict:
+                if param_dict['waveform_center_idx']:
+                    waveform_center_idx = param_dict['waveform_center_idx']
+            if 'direction' in param_dict:
+                if param_dict['direction']:
+                    direction = param_dict['direction']
+            if 'min_amp_ratio_threshold' in param_dict:
+                if param_dict['min_amp_ratio_threshold']:
+                    min_amp_ratio_threshold = param_dict['min_amp_ratio_threshold']
+            if 'max_amp_ratio_threshold' in param_dict:
+                if param_dict['max_amp_ratio_threshold']:
+                    max_amp_ratio_threshold = param_dict['max_amp_ratio_threshold']
+        n_clusters = len(sorting.get_unit_ids())
+        n_channels = len(recording.get_channel_ids())
+        # HARDCODED, GRABS 1.3 MS WINDOW ASSUMING 30 kHZ SAMPLING RATE AND ±1 MS WAVEFORMS CENTERED ON SPIKE TIMES
+        # TODO: make flexible
+        n_waveform_points = 58
+        # if waveforms is None and 'waveforms' in sorting.get_shared_unit_spike_feature_names():
+        #     avg_waveforms = np.zeros((n_clusters, n_channels, n_waveform_points))
+        #     for unit_ind, unit in enumerate(range(1, n_clusters+1)):
+        #         avg_waveforms[unit_ind] = np.mean(sorting.get_unit_spike_features(unit, 'waveforms'),axis=0)
+        if waveforms is None:
+            avg_waveforms = self._get_average_waveforms(recording=recording,
+                                                        sorting=sorting)
+        if channel_list is None:
+            channel_list = self._get_peak_channels(recording, sorting)
+        if waveform_center_idx is None:
+            n_points = avg_waveforms.shape[2]
+            waveform_center = n_points // 2
+            waveform_center_idx = np.arange(waveform_center-2, waveform_center+3)
+        wave_mask = np.zeros((n_clusters, n_channels),dtype=bool)
+        for count, ind in enumerate(channel_list):
+            wave_mask[count, ind] = True
+        waveform_averages = avg_waveforms[wave_mask].copy()
+        if direction == 'down':
+            peak_values = np.amin(waveform_averages[:,waveform_center_idx], axis=1)
+            peak_locations = np.argmin(waveform_averages, axis=1)
+        elif direction == 'up':
+            peak_values = np.amax(waveform_averages[:,waveform_center_idx], axis=1)
+            peak_locations = np.argmax(waveform_averages, axis=1)
+        elif direction == 'both':
+            peak_values = np.amax(np.abs(waveform_averages[:,waveform_center_idx]),axis=1)
+            peak_locations = np.argmax(np.abs(waveform_averages[:,waveform_center_idx]),axis=1)
+        min_amplitude_ratio = np.abs(peak_values/np.amin(waveform_averages,axis=1))
+        max_amplitude_ratio = np.abs(peak_values/np.amax(waveform_averages,axis=1))
+        min_amp_ratio_ind = np.logical_and(min_amplitude_ratio >= min_amp_ratio_threshold[0],
+                                        min_amplitude_ratio <= min_amp_ratio_threshold[1])
+        max_amp_ratio_ind = np.logical_and(max_amplitude_ratio >= max_amp_ratio_threshold[0],
+                                        max_amplitude_ratio <= max_amp_ratio_threshold[1])
+        aligned_waveforms_ind = np.logical_and(min_amp_ratio_ind, max_amp_ratio_ind)
+        if verbose:
+            time_end = time.time()
+            print( "Computed waveform misalignment for %d clusters, %s directional flag" % (n_clusters, direction) )
+            print( "%.6f seconds elapsed" % (time_end-time_start) )
+            for cluster in range(n_clusters):
+                print( "\tCluster %d, channel %d:\twaveform center %d to %d samples inclusive out of %d samples" % (cluster+1, channel_list[cluster], waveform_center_idx[0], waveform_center_idx[-1], n_points) )
+            print()
+        return aligned_waveforms_ind
+    
+    def _get_peak_channels(self, recording, sorting, n_jobs=24, detection_dir='neg', mode='mean', max_spikes_per_unit=10000):
+        
+        channels = recording.get_channel_ids()
+        peak_channels = st.postprocessing.get_unit_max_channels(recording, sorting, peak=detection_dir,
+                                                                n_jobs=n_jobs, mode=mode,
+                                                                channel_ids=channels,
+                                                                max_spikes_per_unit=max_spikes_per_unit)
+        return [peak_ch - channels[0] for peak_ch in peak_channels]
+
+    def _get_waveforms(self, recording, sorting, max_spikes_per_unit=10000, ms_before=1, ms_after=1):
+
+        waveforms, _, _ = st.postprocessing.get_unit_waveforms(recording, sorting,
+                                                            recompute_info=True, return_idxs=True,
+                                                            ms_before=ms_before, ms_after=ms_after,
+                                                            max_spikes_per_unit=max_spikes_per_unit)
+        return waveforms
+
+    def _get_average_waveforms(self, recording, sorting, max_spikes_per_unit=1000, ms_before=1, ms_after=1):
+        
+        n_clusters = len(sorting.get_unit_ids())
+        n_channels = len(recording.get_channel_ids())
+        n_waveform_points = 58 
+        waveforms = self._get_waveforms(recording=recording, sorting=sorting, 
+                                        max_spikes_per_unit=max_spikes_per_unit,
+                                        ms_before=ms_before, ms_after=ms_after)
+        waveform_arr = self._make_waveform_arr(waveforms, n_clusters, n_channels,
+                                               n_waveform_points, 
+                                               max_spikes_per_unit=max_spikes_per_unit)
+        return np.nanmean(waveform_arr, axis=1)
+
+    def _make_waveform_arr(self, waveforms, n_clusters, n_channels, window_size, max_spikes_per_unit=10000, keep_nan=True):
+        
+        waveform_arr = np.full((n_clusters, max_spikes_per_unit, n_channels, window_size),np.nan)
+        for wave_ind in range(0,n_clusters):
+            waveform_arr[wave_ind,:waveforms[wave_ind].shape[0],:,:] = waveforms[wave_ind]
+        if keep_nan is True:
+            return waveform_arr
+        else:
+            return np.nan_to_num(waveform_arr, copy=False)
 
     def fetch_nwb(self, *attrs, **kwargs):
         return fetch_nwb(self, (AnalysisNwbfile, 'analysis_file_abs_path'), *attrs, **kwargs)
