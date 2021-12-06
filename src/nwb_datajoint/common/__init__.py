@@ -19,9 +19,12 @@ from .common_lab import Institution, Lab, LabMember, LabTeam
 from .common_nwbfile import (Nwbfile, AnalysisNwbfile, 
                              KacheryChannel, NwbfileKacherySelection, AnalysisNwbfileKacherySelection,
                              NwbfileKachery, AnalysisNwbfileKachery) 
-from .common_region import BraiRegion
+from .common_region import BrainRegion
 from .common_sensors import SensorData
 from .common_session import ExperimenterList, Session
+from .common_position import (PositionInfoParameters, IntervalLinearizationSelection, IntervalLinearizedPosition,
+                              IntervalPositionInfo, IntervalPositionInfoSelection, LinearizationParameters,
+                              PositionVideo, TrackGraph)
 from .common_spikesorting import (SortGroup, SpikeSortingFilterParameters, SpikeSortingArtifactDetectionParameters,
                                   SpikeSortingRecordingSelection, SpikeSortingRecording, 
                                   SpikeSortingWorkspace, 

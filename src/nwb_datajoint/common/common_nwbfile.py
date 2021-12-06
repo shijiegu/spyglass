@@ -341,7 +341,7 @@ class AnalysisNwbfile(dj.Manual):
                     for metric in list(metrics):
                         metric_data = metrics[metric].to_list()
                         print(f'Adding metric {metric} : {metric_data}')
-                        nwbf.add_unit_column(name=metric,
+                        nwbf.add_units_column(name=metric,
                                              description=f'{metric} sorting metric',
                                              data=metric_data)
                 if labels is not None:
@@ -421,7 +421,7 @@ class NwbfileKacherySelection(dj.Manual):
     """
 
 @schema
-class NwbfileKachery(dj.Manual):
+class NwbfileKachery(dj.Computed):
     definition = """
     -> NwbfileKacherySelection
      ---
@@ -443,7 +443,7 @@ class AnalysisNwbfileKacherySelection(dj.Manual):
     """
 
 @schema
-class AnalysisNwbfileKachery(dj.Manual):
+class AnalysisNwbfileKachery(dj.Computed):
     definition = """
     -> AnalysisNwbfileKacherySelection
     ---
@@ -451,7 +451,7 @@ class AnalysisNwbfileKachery(dj.Manual):
     analysis_file_link_uri='': varchar(200)  # the uri of an optional linked file
     """
 
-    def add(self, key):
+    def make(self, key):
         print(f'Linking {key["analysis_file_name"]} and storing in kachery...')
         key['analysis_file_uri'] = kc.link_file(AnalysisNwbfile().get_abs_path(key['analysis_file_name']))
         self.insert1(key)
