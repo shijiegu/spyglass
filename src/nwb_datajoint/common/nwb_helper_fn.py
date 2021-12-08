@@ -221,7 +221,6 @@ def get_electrode_indices(nwb_object, electrode_ids):
     else:
         raise ValueError(
             'nwb_object must be of type ElectricalSeries or NWBFile')
-
     return [elect_idx for elect_idx, elect_id in enumerate(selected_elect_ids) if elect_id in electrode_ids]
 
 
