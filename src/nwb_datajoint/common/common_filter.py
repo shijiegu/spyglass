@@ -239,7 +239,7 @@ class FirFilter(dj.Manual):
                     else:
                         data = np.asarray(data_on_disk[:, start:stop], dtype=data_dtype)
                     
-                    extracted_ts = timestamps[0:-1:decimation]
+                    extracted_ts = timestamps[0::decimation]
                     new_timestamps[ts_offset:ts_offset +
                                len(extracted_ts)] = extracted_ts
                     ts_offset += len(extracted_ts)
