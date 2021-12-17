@@ -411,14 +411,14 @@ class SpikeSortingRecording(dj.Computed):
             # update the sort interval valid times to exclude the artifacts
             sort_interval_valid_times = interval_list_intersect(
                 sort_interval_valid_times, no_artifact_valid_times)
-            # exclude the invalid times
-            mask = np.full(recording.get_num_frames(), True, dtype='bool')
-            excluded_ind = interval_list_excludes_ind(
-                sort_interval_valid_times, recording_timestamps)
-            if len(excluded_ind) > 0:
-                mask[interval_list_excludes_ind(
-                    sort_interval_valid_times, recording_timestamps)] = False
-            recording = st.preprocessing.mask(recording, mask)
+        # exclude the invalid times
+        mask = np.full(recording.get_num_frames(), True, dtype='bool')
+        excluded_ind = interval_list_excludes_ind(
+            sort_interval_valid_times, recording_timestamps)
+        if len(excluded_ind) > 0:
+            mask[interval_list_excludes_ind(
+                sort_interval_valid_times, recording_timestamps)] = False
+        recording = st.preprocessing.mask(recording, mask)
 
         #add the sort_interval_valid_times as an interval list
         tmp_key = {}
@@ -751,7 +751,7 @@ class SpikeSortingWorkspace(dj.Computed):
         # change unit id to string
         for metric_ind in range(len(external_metrics)):
             for old_unit_id in metrics.index:
-                external_metrics[metric_ind]['data'][str(
+                external_metrsics[metric_ind]['data'][str(
                     old_unit_id)] = external_metrics[metric_ind]['data'].pop(old_unit_id)
                 # change nan to none so that json can handle it
                 if np.isnan(external_metrics[metric_ind]['data'][str(old_unit_id)]):
@@ -1380,7 +1380,7 @@ class AutomaticCuration(dj.Computed):
         sorting = workspace.get_sorting_extractor(sorting_id)
         recording = workspace.get_recording_extractor(workspace.recording_ids[0])
         orig_recording = copy(recording)
-        auto_curate_param_name = (AufiltertomaticCurationSelection & key).fetch1('automatic_curation_parameter_set_name')
+        auto_curate_param_name = (AutomaticCurationSelection & key).fetch1('automatic_curation_parameter_set_name')
         acpd = (AutomaticCurationParameters & {'automatic_curation_parameter_set_name': auto_curate_param_name}).fetch1('automatic_curation_parameter_dict')
         # check for defined automatic curation keys / parameters
 
@@ -1406,24 +1406,47 @@ class AutomaticCuration(dj.Computed):
                     noise_reject_param = acpd['noise_reject_param']
                     # Reject everything above hard threshold
                     # TODO make more flexible
-                    noise_reject_units = self.thresh_noise_overlap(metrics['noise_overlap'], param_dict=noise_reject_param)
-                    label_action = {'type' : 'ADD_UNIT_LABEL',
-                                    'unitId' : noise_reject_units,
-                                    'label' : 'noise'}
-                    # workspace.add_sorting_curation_action(sorting_id, label_action)
+                    noise_reject_units = self.thresh_noise_overlap(metrics['noise_overlap'], 
+                                            param_dict=noise_reject_param)
+                    label_type = 'noise'
+                    if 'label' in noise_reject_param:
+                        if noise_reject_param['label']:
+                            label_type = noise_reject_param['label']
+                    workspace.sorting_curation_add_label(sorting_id=sorting_id, 
+                                            label=label_type, 
+                                            unit_ids=noise_reject_units)
+                    print(f'Added label {label_type} to units over noise overlap threshold')
         if 'isi_violation' in acpd:
             if acpd['isi_violation']:
                 isi_violation_param = acpd['isi_violation_param']
-                isi_violation_units = self.compute_isi_violations(
-                                                key, 
-                                                param_dict=isi_violation_param)
+                isi_violations, isi_violation_units = self.compute_isi_violations(
+                                                        key, 
+                                                        param_dict=isi_violation_param)
+                label_type = 'noise'
+                if 'label' in isi_violation_param:
+                    if isi_violation_param['label']:
+                        label_type = isi_violation_param['label']
+                workspace.sorting_curation_add_label(sorting_id=sorting_id,
+                                        label=label_type,
+                                        unit_ids=isi_violation_units)
+                metrics['isi_violations'] = isi_violations
+                print(f'Added label {label_type} to units with isi violations over threshold')
         if 'misaligned_waveform' in acpd:
             if acpd['misaligned_waveform']:
                 misaligned_waveform_param = acpd['misaligned_waveform_param']
                 misaligned_waveform_units = self.compute_waveform_misalignment(
-                                                orig_recording, sorting, 
-                                                param_dict=misaligned_waveform_param)
-        raise Exception
+                                           orig_recording, sorting, 
+                                           param_dict=misaligned_waveform_param)
+                label_type = 'noise'
+                if 'label' in misaligned_waveform_param:
+                    if misaligned_waveform_param['label']:
+                        label_type = misaligned_waveform_param['label']
+                workspace.sorting_curation_add_label(sorting_id=sorting_id,
+                                        label=label_type,
+                                        unit_ids=misaligned_waveform_units)
+                # TODO: add representative metric of misalignment to metrics df 
+                # metrics['waveform_misalignment'] = misaligned_waveform_dist
+                print(f'Added label {label_type} to units with misaligned waveforms')
         # Store the sorting with metrics in the NWB file and update the metrics in the workspace
         sort_interval_list_name = (SpikeSortingRecording & key).fetch1('sort_interval_list_name')
 
@@ -1433,9 +1456,10 @@ class AutomaticCuration(dj.Computed):
         key['analysis_file_name'], key['units_object_id'] = \
             store_sorting_nwb(key, sorting=sorting, sort_interval_list_name=sort_interval_list_name,
             sort_interval=sort_interval, metrics=metrics)
-
         SpikeSortingWorkspace().add_metrics_to_sorting(key, sorting_id=sorting_id, metrics=metrics)
+        print('inserting into AutomaticCuration table')
         self.insert1(key)
+        print('inserted into AutomaticCuration table')
     
     def thresh_noise_overlap(self, noise_overlap, param_dict=None, threshold=0.03):
         if isinstance(noise_overlap, pd.Series):
@@ -1445,9 +1469,9 @@ class AutomaticCuration(dj.Computed):
                 if param_dict['threshold']:
                     threshold = param_dict['threshold']
         valid_noise_overlap = np.zeros_like(noise_overlap, dtype=bool)
-        valid_noise_overlap[np.where(noise_overlap<0.03)] = True
-        pdb.set_trace()
-        return valid_noise_overlap
+        valid_noise_overlap[np.where(noise_overlap<threshold)] = True
+        invalid_noise_overlap = np.where(valid_noise_overlap == False)[0].tolist()
+        return [x+1 for x in invalid_noise_overlap]
 
     def compute_isi_violations(self, key, spike_times=None, param_dict=None, refractory_period=2/1000, exclusion_window=10/30000, spike_to_isi_ratio_threshold=400, verbose=False):
         """
@@ -1517,18 +1541,18 @@ class AutomaticCuration(dj.Computed):
             for cluster in range(n_clusters):
                 print( "\tCluster %d:\t%d ISI violations out of %d spikes" % (cluster+1, np.sum(isi_violations_list[cluster]), len(spike_times[cluster])) )
             print()
-        
-        return valid_isi_ind
+        invalid_isi_units = np.where(valid_isi_ind == False)[0].tolist()
+        return isi_violation_counts, [x+1 for x in invalid_isi_units]
     
-    def compute_waveform_misalignment(self, recording, sorting, param_dict=None, waveforms=None, channel_list=None, waveform_center_idx=None, direction='down', min_amp_ratio_threshold=[1, 1], max_amp_ratio_threshold=[0.8, np.inf], verbose=False):
+    def compute_waveform_misalignment(self, recording, sorting, param_dict=None, waveforms=None, channel_list=None, waveform_center_window=[2,3], direction='down', min_amp_ratio_threshold=[1, 1], max_amp_ratio_threshold=[0.8, np.inf], verbose=False):
             
         if verbose:
             time_start = time.time()
 
         if param_dict is not None:
-            if 'waveform_center_idx' in param_dict:
+            if 'waveform_center_window' in param_dict:
                 if param_dict['waveform_center_idx']:
-                    waveform_center_idx = param_dict['waveform_center_idx']
+                    waveform_center_window = param_dict['waveform_center_window']
             if 'direction' in param_dict:
                 if param_dict['direction']:
                     direction = param_dict['direction']
@@ -1543,18 +1567,17 @@ class AutomaticCuration(dj.Computed):
         # HARDCODED, GRABS 1.3 MS WINDOW ASSUMING 30 kHZ SAMPLING RATE AND ±1 MS WAVEFORMS CENTERED ON SPIKE TIMES
         # TODO: make flexible
         n_waveform_points = 58
-        # if waveforms is None and 'waveforms' in sorting.get_shared_unit_spike_feature_names():
-        #     avg_waveforms = np.zeros((n_clusters, n_channels, n_waveform_points))
-        #     for unit_ind, unit in enumerate(range(1, n_clusters+1)):
-        #         avg_waveforms[unit_ind] = np.mean(sorting.get_unit_spike_features(unit, 'waveforms'),axis=0)
         if waveforms is None:
             avg_waveforms = self._get_average_waveforms(recording=recording,
                                                         sorting=sorting)
         if channel_list is None:
             channel_list = self._get_peak_channels(recording, sorting)
-        if waveform_center_idx is None:
-            n_points = avg_waveforms.shape[2]
-            waveform_center = n_points // 2
+        n_points = avg_waveforms.shape[2]
+        waveform_center = n_points // 2
+        if (waveform_center_window is not None) and (len(waveform_center_window) == 2):
+            waveform_center_idx = np.arange(waveform_center-waveform_center_window[0], waveform_center+waveform_center_window[1])
+        else:
+            # Default to 5 point window around the center index
             waveform_center_idx = np.arange(waveform_center-2, waveform_center+3)
         wave_mask = np.zeros((n_clusters, n_channels),dtype=bool)
         for count, ind in enumerate(channel_list):
@@ -1583,7 +1606,8 @@ class AutomaticCuration(dj.Computed):
             for cluster in range(n_clusters):
                 print( "\tCluster %d, channel %d:\twaveform center %d to %d samples inclusive out of %d samples" % (cluster+1, channel_list[cluster], waveform_center_idx[0], waveform_center_idx[-1], n_points) )
             print()
-        return aligned_waveforms_ind
+        invalid_waveform_units = np.where(aligned_waveforms_ind == False)[0].tolist()
+        return [x+1 for x in invalid_waveform_units]
     
     def _get_peak_channels(self, recording, sorting, n_jobs=24, detection_dir='neg', mode='mean', max_spikes_per_unit=10000):
         
