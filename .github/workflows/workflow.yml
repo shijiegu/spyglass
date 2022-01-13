@@ -46,7 +46,6 @@ jobs:
         # note that the owner must sign in to kacheryhub.org, register the node, and add the node
         # to the spyglass-dev channel with the password or the spyglass-dev channel owner (rly@lbl.gov) must
         # approve the node and give it access permissions
-        kachery-daemon-info
     - name: Set up conda environment
       uses: conda-incubator/setup-miniconda@v2
       with:
@@ -56,6 +55,8 @@ jobs:
       shell: bash -l {0}
       run: |
         pip install -r requirements-dev.txt
+        pip install --upgrade kachery-daemon
+        kachery-daemon-info
     - name: Install nwb_datajoint
       shell: bash -l {0}
       run: |
