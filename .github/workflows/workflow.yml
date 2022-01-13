@@ -32,6 +32,20 @@ jobs:
       uses: actions/setup-python@v2
       with:
         python-version: 3.8
+    - name: Set up kachery daemon env
+      uses: conda-incubator/setup-miniconda@v2
+      with:
+        activate-environment: kachery-node-env
+    - name: Install requirements for kachery daemon env
+      shell: bash -l {0}
+      run: |
+        conda install -c conda-forge nodejs
+        pip install numpy
+        pip install --upgrade kachery-daemon
+        kachery-daemon-start --label spyglass-ci --owner rly@lbl.gov
+        # note that the owner must sign in to kacheryhub.org, register the node, and add the node
+        # to the spyglass-dev channel, and the spyglass-dev channel owner (rly@lbl.gov) must
+        # approve the node and give it access permissions
     - name: Set up conda environment
       uses: conda-incubator/setup-miniconda@v2
       with:
