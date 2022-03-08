@@ -1,5 +1,5 @@
 from datetime import datetime
-import kachery as ka
+import kachery_client as kc
 import os
 import pathlib
 import pynwb
@@ -15,8 +15,8 @@ def test_1():
     from nwb_datajoint.common import Session, DataAcquisitionDevice, CameraDevice, Probe
     from nwb_datajoint.data_import import insert_sessions
 
-    with ka.config(fr='default_readonly'):
-        ka.load_file('sha1://8ed68285c327b3766402ee75730d87994ac87e87/beans20190718_no_eseries_no_behavior.nwb',
+    with kc.config(fr='default_readonly'):
+        kc.load_file('sha1://8ed68285c327b3766402ee75730d87994ac87e87/beans20190718_no_eseries_no_behavior.nwb',
                      dest=str(nwbfile_path))
 
     # test that the file can be read. this is not used otherwise
