@@ -150,7 +150,6 @@ class SpikeSorting(dj.Computed):
             if artifact_times.ndim == 1:
                 artifact_times = np.expand_dims(artifact_times, 0)
 
-            # convert artifact intervals to indices
             for interval in artifact_times:
                 artifact_start_frame = np.searchsorted(timestamps, interval[0])
                 artifact_end_frame = np.searchsorted(timestamps, interval[1])
