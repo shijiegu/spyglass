@@ -157,7 +157,7 @@ class SpikeSorting(dj.Computed):
                 
                 recording = sit.remove_artifacts(
                     recording=recording,
-                    list_triggers=artifact_start_frame,
+                    list_triggers=[artifact_start_frame],
                     ms_before=0, ms_after=ms_after, mode='zeros')
 
         print(f'Running spike sorting on {key}...')
