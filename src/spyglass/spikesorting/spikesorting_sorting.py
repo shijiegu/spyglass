@@ -151,17 +151,15 @@ class SpikeSorting(dj.Computed):
                 artifact_times = np.expand_dims(artifact_times, 0)
 
             # convert artifact intervals to indices
-            list_triggers = []
             for interval in artifact_times:
-                list_triggers.append(
-                    np.arange(np.searchsorted(timestamps, interval[0]),
-                              np.searchsorted(timestamps, interval[1])))
-            list_triggers = [list(np.concatenate(list_triggers))]
-            pad = 2 * (1 / fs) * 1000
-            recording = sit.remove_artifacts(
-                recording=recording,
-                list_triggers=list_triggers,
-                ms_before=0, ms_after=pad, mode='zeros')
+                artifact_start_frame = np.searchsorted(timestamps, interval[0])
+                artifact_end_frame = np.searchsorted(timestamps, interval[1])
+                ms_after = (artifact_end_frame - artifact_start_frame + 1)/recording.get_sampling_frequency()*1000
+                
+                recording = sit.remove_artifacts(
+                    recording=recording,
+                    list_triggers=artifact_start_frame,
+                    ms_before=0, ms_after=ms_after, mode='zeros')
 
         print(f'Running spike sorting on {key}...')
         sorter, sorter_params = (SpikeSorterParameters & key).fetch1(
