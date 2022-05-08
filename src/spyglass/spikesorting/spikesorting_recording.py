@@ -8,7 +8,9 @@ import numpy as np
 import spikeinterface as si
 import spikeinterface.extractors as se
 import spikeinterface.toolkit as st
+import spikeinterface.widgets as sw
 import probeinterface as pi
+import ephyviewer
 
 from ..common.common_device import Probe
 from ..common.common_ephys import Electrode, ElectrodeGroup
@@ -474,3 +476,46 @@ class SpikeSortingRecording(dj.Computed):
             recording = recording.set_probe(tetrode, in_place=True)
         
         return recording
+
+
+    @staticmethod
+    def view(key):
+        """use the spikeinterface widgets to visualize the recording
+
+        Parameters
+        ----------
+        key : dict
+            key to a single recording
+        """
+        recording_path = (SpikeSortingRecording & key).fetch1('recording_path')
+        recording_name = SpikeSortingRecording._get_recording_name(key)
+        recording = si.load_extractor(recording_path)
+
+        if recording.get_num_segments() > 1 and isinstance(recording, si.AppendSegmentRecording):
+            recording = si.concatenate_recordings(recording.recording_list)
+        elif recording.get_num_segments() > 1 and isinstance(recording, si.BinaryRecordingExtractor):
+            recording = si.concatenate_recordings([recording])
+
+        sw.plot_timeseries(recording = recording, time_range = [0, recording.get_num_samples()])
+
+    @staticmethod
+    def ephysview(key):
+        """use the ephyviewer package to visualize the recording
+
+        Parameters
+        ----------
+        key : dict
+            key to a single recording
+        """
+        recording_path = (SpikeSortingRecording & key).fetch1('recording_path')
+        recording_name = SpikeSortingRecording._get_recording_name(key)
+        recording = si.load_extractor(recording_path)
+
+        app = ephyviewer.mkQApp()
+        win = ephyviewer.MainViewer(debug=True, show_auto_scale=True)
+
+        view = ephyviewer.TraceViewer(source=recording, name=recording_name)
+        win.add_view(view)
+
+        win.show()
+        app.exec_()
