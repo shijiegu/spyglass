@@ -27,8 +27,12 @@ def interval_union(interval_list1,interval_list2):
     interval_list: np.array, (N,2)
 
     '''
-    interval_list1=interval_list1.tolist()
-    interval_list2=interval_list2.tolist()
+    # make sure 1 dimensional arrays are tamed.
+    interval_list1 = interval_list1.reshape((-1,2)) 
+    interval_list2 = interval_list2.reshape((-1,2))
+    
+    interval_list1 = interval_list1.tolist()
+    interval_list2 = interval_list2.tolist()
 
     # find all pairwise intersections
     intersect_tally=np.zeros((len(interval_list1),len(interval_list2)))

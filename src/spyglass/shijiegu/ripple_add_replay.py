@@ -4,6 +4,7 @@ import pandas as pd
 import xarray as xr
 import matplotlib.pyplot as plt
 
+
 from spyglass.shijiegu.Analysis_SGU import (TrialChoice,
                                    TrialChoiceReplay,ExtendedTrialChoiceReplay,NotExtendedTrialChoiceReplay,
                                    RippleTimes,ExtendedRippleTimes,
@@ -12,13 +13,16 @@ from spyglass.shijiegu.Analysis_SGU import (TrialChoice,
                                    Decode,get_linearization_map,EpochPos,TetrodeNumber)
 from spyglass.utils.nwb_helper_fn import get_nwb_copy_filename
 from spyglass.shijiegu.load import load_epoch_data, linear_segment2str
+from spyglass.shijiegu.ripple_detection import removeArtifactTime, load_position, loadRippleLFP_OneChannelPerElectrode
+from spyglass.shijiegu.helpers import interpolate_to_new_time
 from spyglass.common.common_position import TrackGraph
 from ripple_detection.core import segment_boolean_series
-from spyglass.shijiegu.helpers import interpolate_to_new_time
 from spyglass.shijiegu.singleUnit import electrode_unit
-
+from spyglass.common import IntervalList
+from spyglass.common import interval_list_intersect
 
 POSTERIOR_THRESHOLD = 0.4
+SPEED_THRESHOLD = 4 #4cm/s
 MINIMUM_DECODE_LENGTH = 10 #2 ms decode bin, 20 ms
 
 def replay_parser_master(nwb_file_name, epoch_num,
@@ -30,8 +34,9 @@ def replay_parser_master(nwb_file_name, epoch_num,
                         replace = True):
     nwb_copy_file_name = get_nwb_copy_filename(nwb_file_name)
     # 1. Load state script
-    key={'nwb_file_name':nwb_copy_file_name,'epoch':epoch_num}
-    epoch_name=(TrialChoice & key).fetch1('epoch_name')
+    key = (EpochPos & {'nwb_file_name':nwb_copy_file_name,'epoch':epoch_num}).fetch1()
+    epoch_name = key['epoch_name']
+    position_interval = key['position_interval']
     print('epoch name',epoch_name)
 
     # 2. load data
@@ -40,6 +45,21 @@ def replay_parser_master(nwb_file_name, epoch_num,
         lfp_df,theta_df,ripple_df,neural_df,_) = load_epoch_data(nwb_copy_file_name,epoch_num,
                                                   classifier_param_name,
                                                   encoding_set)
+
+
+    # load Position
+    if extended:
+        position_valid_times = (IntervalList & {'nwb_file_name': nwb_copy_file_name,
+                                                'interval_list_name': position_interval}).fetch1('valid_times')
+        filtered_lfps, filtered_lfps_t, CA1TetrodeInd, CCTetrodeInd = loadRippleLFP_OneChannelPerElectrode(
+            nwb_copy_file_name,epoch_name,position_valid_times)
+
+        key = (EpochPos & {'nwb_file_name':nwb_copy_file_name,'epoch': epoch_num}).fetch1()
+        position_interval = key['position_interval']
+        position_info = load_position(nwb_copy_file_name,position_interval)
+        position_info_upsample = interpolate_to_new_time(position_info, filtered_lfps_t)
+        position_info_upsample = removeArtifactTime(position_info_upsample, filtered_lfps)
+
     # load MUA
     mua_path=(MUA & {'nwb_file_name': nwb_copy_file_name,
                  'interval_list_name':epoch_name}).fetch1('mua_trace')
@@ -51,14 +71,23 @@ def replay_parser_master(nwb_file_name, epoch_num,
         mua_threshold = (MUA & {'nwb_file_name': nwb_copy_file_name,
                  'interval_list_name':epoch_name}).fetch1('mean') + 0.5 * (MUA & {'nwb_file_name': nwb_copy_file_name,
                  'interval_list_name':epoch_name}).fetch1('sd')
+    elif decode_threshold_method == 'MUA_M05SD':
+        mua_threshold = (MUA & {'nwb_file_name': nwb_copy_file_name,
+                 'interval_list_name':epoch_name}).fetch1('mean') - 0.5 * (MUA & {'nwb_file_name': nwb_copy_file_name,
+                 'interval_list_name':epoch_name}).fetch1('sd')
     else:
         mua_threshold = 0
 
-    ripple_times = pd.DataFrame((RippleTimes() & {'nwb_file_name': nwb_copy_file_name,
-                                              'interval_list_name': epoch_name}).fetch1('ripple_times'))
     if extended:
-        ripple_times = pd.DataFrame((ExtendedRippleTimes() & {'nwb_file_name': nwb_copy_file_name,
-                                              'interval_list_name': epoch_name}).fetch1('ripple_times'))
+        ripple_times_query = (ExtendedRippleTimes() & {'nwb_file_name': nwb_copy_file_name,
+                                           'interval_list_name': epoch_name}).fetch1('ripple_times')
+    else:
+        ripple_times_query = (RippleTimes() & {'nwb_file_name': nwb_copy_file_name,
+                                              'interval_list_name': epoch_name}).fetch1('ripple_times')
+    if type(ripple_times_query) is dict:
+        ripple_times = pd.DataFrame(ripple_times_query)
+    else:
+        ripple_times = pd.read_csv(ripple_times_query)
 
     # IF THIS STEP HAS RUN BEFORE
     if 'animal_location' in ripple_times.columns:
@@ -66,11 +95,23 @@ def replay_parser_master(nwb_file_name, epoch_num,
                                  'cont_intvl','frag_intvl','cont_intvl_replay'])
 
     # 3. add replay and trial time data to ripple data
-    ripple_times = add_location_replay(ripple_times,
+    if extended:
+        ripple_times = add_location_replay(ripple_times,
                                        linear_position_df,node_location,linear_map,
                                        log_df,
                                        mua_xr,mua_threshold,
-                                       decode, causal = causal)
+                                       decode,
+                                       causal = causal,
+                                       speed = np.array(position_info_upsample.head_speed),
+                                       speed_time = filtered_lfps_t)
+    else:
+        ripple_times = add_location_replay(ripple_times,
+                                       linear_position_df,node_location,linear_map,
+                                       log_df,
+                                       mua_xr,mua_threshold,
+                                       decode,
+                                       causal = causal)
+
 
     # reinsert ripple data with added information
     epoch_name = (EpochPos() & {'nwb_file_name':
@@ -80,7 +121,14 @@ def replay_parser_master(nwb_file_name, epoch_num,
            'classifier_param_name': classifier_param_name,
            'encoding_set': encoding_set,
            'decode_threshold_method': decode_threshold_method}
-    key['ripple_times'] = ripple_times.to_dict()
+
+
+    animal = nwb_copy_file_name[:5]
+    savePath = os.path.join(f'/cumulus/shijie/recording_pilot/{animal}/decoding',
+                        nwb_copy_file_name+'_'+epoch_name+'_extended_ripple_times_with_decode.pkl')
+    ripple_times.to_pickle(savePath)
+
+    key['ripple_times'] = savePath
     if extended:
         ExtendedRippleTimesWithDecode().insert1(key,replace = replace)
     else:
@@ -131,14 +179,19 @@ def replay_parser_master(nwb_file_name, epoch_num,
 
 
 def add_location_replay(ripple_times,linear_position_df,
-                        node_location,linear_map,log_df,mua_xr,mua_threshold,decode,causal = True):
+                        node_location,linear_map,log_df,mua_xr,mua_threshold,decode,
+                        causal = True,
+                        speed = None,
+                        speed_time = None):
     '''
     for each ripple, find where the animal is.
     If it is around well, add it to well (0 - Home, 1 - Well 1, ...), SWR that occurs on track will be in its segment number
     '''
     ripple_times = add_location(ripple_times,linear_position_df,node_location)
     ripple_times = add_trial(ripple_times,log_df)
-    ripple_times = add_replay(ripple_times,mua_xr,mua_threshold,decode,linear_map,causal = causal)
+    ripple_times = add_replay(ripple_times,mua_xr,mua_threshold,decode,linear_map,
+                              causal = causal,
+                              speed = speed, speed_time = speed_time)
     return ripple_times
 
 def add_location(ripple_times,linear_position_df,node_location,colind = 2):
@@ -182,18 +235,30 @@ def add_trial(ripple_times,log_df):
     trial_ind=np.array(log_df.index)
 
     for r_ind in ripple_times.index:
+        location = ripple_times.loc[r_ind,'animal_location']
         (t0,t1) = (ripple_times.loc[r_ind,'start_time'],ripple_times.loc[r_ind,'end_time'])
-        trial_number = np.argwhere(log_df.timestamp_H >= t0).ravel()[0]
-        # this way only works if the trial is legal.
-        if np.isin(trial_number,legal_trials):
-            ripple_times.loc[r_ind,'trial_number'] = trial_number
+        tmp = np.argwhere(log_df.timestamp_H <= t0).ravel()
+        # Home  replay      Well          Home            Well
+        #   t                t             t+1            t+1
+        #                               tmp[0] + 1
+        # this way only works if the next trial is legal.
+        if len(tmp) > 0 and np.isin(tmp[-1]+1,legal_trials):
+            trial_number = trial_ind[tmp[-1]]
+        elif location == "home":
+            # use home well time
+            trial_number = trial_ind[np.argsort(abs(np.array(log_df.timestamp_H[:-1])-t0))[0]]
+        elif location[:4] == "well":
+            # use outer well time
+            trial_number = trial_ind[np.argsort(abs(np.array(log_df.timestamp_O[:-1])-t0))[0]]
+        # future replays not occurred at home or wells will be assigned to the next trial
         else:
-            # if it is a nonlegal trial, use outer well time
-            trial_number = np.argwhere(log_df.timestamp_O-1 >= t0).ravel()[0] #assume the rat takes 1 second to go between places
-            ripple_times.loc[r_ind,'trial_number'] = trial_number
+            trial_number = trial_ind[np.argwhere(log_df.timestamp_O >= t0).ravel()[0]]
+        ripple_times.loc[r_ind,'trial_number'] = trial_number
     return ripple_times
 
-def add_replay(ripple_times,mua_xr,mua_threshold,decode,linear_map,causal = False):
+def add_replay(ripple_times,mua_xr,mua_threshold,decode,linear_map,
+               causal = False,
+               speed = None, speed_time = None):
     """also invalidates low mua time"""
 
     mua_downsample = (interpolate_to_new_time(mua_xr.to_dataframe(), decode.time)).to_xarray()
@@ -206,12 +271,22 @@ def add_replay(ripple_times,mua_xr,mua_threshold,decode,linear_map,causal = Fals
     '''
     for r_ind in ripple_times.index:
         (t0,t1) = (ripple_times.loc[r_ind,'start_time'],ripple_times.loc[r_ind,'end_time'])
-        continuous_t,frag_t =segment_ripples(decode,np.array([[t0,t1]]),causal = causal)
-        if len(continuous_t[0]) > 0:
+
+        if speed is not None:
+            # remove high speed
+            is_low_speed = pd.Series(speed <= SPEED_THRESHOLD, index = speed_time)
+            ripple_t0t1 = interval_list_intersect(np.array([t0,t1]), np.array(segment_boolean_series(is_low_speed)))
+        else:
+            ripple_t0t1 = np.array([[t0,t1]])
+
+        #continuous_t,frag_t =segment_ripples(decode,np.array([[t0,t1]]),causal = causal)
+        continuous_t,frag_t =segment_ripples(decode,ripple_t0t1,causal = causal)
+
+        if len(continuous_t) > 0:
             #print(r_ind)
-            ripple_times.at[r_ind,"cont_intvl"] = np.array(continuous_t[0])
-        if len(frag_t[0]) > 0:
-            ripple_times.at[r_ind,"frag_intvl"] = np.array(frag_t[0])
+            ripple_times.at[r_ind,"cont_intvl"] = continuous_t
+        if len(frag_t) > 0:
+            ripple_times.at[r_ind,"frag_intvl"] = frag_t
 
     '''
     for each ripple, decode cont time intervals
@@ -299,7 +374,7 @@ def find_start_end(binary_timebins):
     start_end=np.concatenate((start.reshape((-1,1)),end.reshape((-1,1))),axis=1)
     return start_end
 
-def segment_ripples(decode,ripple_t0t1,causal = False):
+def segment_ripples(decode, ripple_t0t1, causal = False):
     continuous_all=[]
     frag_all=[]
 
@@ -325,6 +400,18 @@ def segment_ripples(decode,ripple_t0t1,causal = False):
         snippets=[time[s] for s in snippets_frag if np.diff(time[s])[0]>0.02]
         frag_all.append(snippets)
 
+    continuous_all = [c for c in continuous_all if len(c)>0]
+    frag_all = [c for c in frag_all if len(c)>0]
+    if len(continuous_all) > 0:
+        continuous_all = np.concatenate(continuous_all)
+    if len(frag_all) > 0:
+        frag_all = np.concatenate(frag_all)
+
+    #if len(continuous_all) > 0:
+    #    continuous_all = list(np.concatenate(continuous_all))
+    #if len(frag_all) > 0:
+    #    frag_all = list(np.concatenate(frag_all))
+
     return continuous_all,frag_all
 
 def position_posterior2arm_posterior(position_posterior,linear_map):
@@ -341,11 +428,17 @@ def position_posterior2arm_posterior(position_posterior,linear_map):
     return posterior_by_arm
 
 def remove_adjacent(nums):
-  a = nums[:1]
-  for item in nums[1:]:
-    if item != a[-1]:
-      a.append(item)
-  return a
+    indices = list(np.arange(len(nums)))
+    
+    ind = indices[:1]
+    a = nums[:1]
+    i = 1
+    for item in nums[1:]:
+        if item != a[-1]:
+            a.append(item)
+            ind.append(indices[i])
+        i += 1
+    return a, ind
 
 def normalize_signal(s):
     return (s - s.mean()) / (s.max() - s.min())
@@ -371,11 +464,12 @@ def plot_ripples_replays(ripple_times,ripples,ripple_table_inds,linear_position_
         t0t1 = np.vstack(ripples) #all possible shadings, just np.vstack(ripples), remove empty segments
         ripple_table_ind = ripple_table_inds[ripple_ind]
 
+        continue_plotting = True
         if wholeTrial:
-            if len(plottimes) == 0:
-                plottimes = [t0t1.ravel()[0]-1,t0t1.ravel()[-1]+1]
-            else:
-                plottimes = [np.min([t0t1.ravel()[0]-1,plottimes[0]]),np.max([t0t1.ravel()[-1]+1,plottimes[1]])]
+            #if len(plottimes) == 0:
+            plottimes = [t0t1.ravel()[0]-1,t0t1.ravel()[-1]+1]
+            #else:
+            #    plottimes = [np.min([t0t1.ravel()[0]-1,plottimes[0]]),np.max([t0t1.ravel()[-1]+1,plottimes[1]])]
             title = f"{save_name} all ripples"
             savename = save_name
         else:
@@ -386,13 +480,17 @@ def plot_ripples_replays(ripple_times,ripples,ripple_table_inds,linear_position_
             duration = int(ripple_times.loc[ripple_table_ind].duration * 1000)
             max_zscore = round(ripple_times.loc[ripple_table_ind].max_zscore,2)
             title = f"{savename} \n duration: {duration} ms, max_zscore: {max_zscore}"
-            title += '\n Decoded arms:' + str(ripple_times.loc[ripple_table_ind].cont_intvl_replay)
+            decoded_arms = ripple_times.loc[ripple_table_ind].cont_intvl_replay
+            title += '\n Decoded arms:' + str(decoded_arms)
+            if len(decoded_arms) == 0:
+                continue_plotting = False
 
-        plot_decode_spiking(plottimes,t0t1,linear_position_df,decode,lfp_df,theta_df,
-                neural_df,mua_df,head_speed,head_orientation,
-                ripple_consensus_trace=None,
-                title=title,savefolder=savefolder,savename=savename,
-                simple=True,tetrode2ind = spikeColInd,mua_thresh = mua_thresh, causal = causal)
+        if continue_plotting:
+            plot_decode_spiking(plottimes,t0t1,linear_position_df,decode,lfp_df,theta_df,
+                    neural_df,mua_df,head_speed,head_orientation,
+                    ripple_consensus_trace=None,
+                    title=title,savefolder=savefolder,savename=savename,
+                    simple=True,tetrode2ind = spikeColInd,mua_thresh = mua_thresh, causal = causal)
         if wholeTrial:
             break
 
@@ -400,7 +498,9 @@ def plot_decode_spiking(plottimes,t0t1,linear_position_xr,decode,lfp_xr,theta_xr
           neural_xr,mua_xr,head_speed,head_orientation,
           ripple_consensus_trace=None,
           title='',savefolder=[],savename=[],
-          simple=False,tetrode2ind=None,likelihood=False,mua_thresh=0,causal = False,plot_spiking=True):
+          simple=False,tetrode2ind=None,likelihood=False,
+          mua_thresh=0,causal = False,plot_spiking=True,
+          plot_changeofmind = False, turnaround = None, head_direction_sign = None):
     '''
     plotting submodule for plot_decode_spiking()
     plottimes: list of 2 numbers
@@ -429,15 +529,9 @@ def plot_decode_spiking(plottimes,t0t1,linear_position_xr,decode,lfp_xr,theta_xr
 
     '''Decode and Position data'''
     x_axis=np.arange(plottimes[0],plottimes[1],100)
-    if likelihood: #Not finished yet
-        axes[0].imshow(posterior_position_subset.T,extent=(
-            plottimes[0],plottimes[1],0,np.array(decode.acausal_posterior.position)[-1]),vmax=0.02,cmap='bone_r',origin='lower')
-    elif causal:
-        axes[0].imshow(posterior_position_subset.T,extent=(
-            plottimes[0],plottimes[1],0,np.array(decode.causal_posterior.position)[-1]),vmax=0.02,cmap='bone_r',rasterized=True,origin='lower')
-    else:
-        axes[0].imshow(posterior_position_subset.T,extent=(
-            plottimes[0],plottimes[1],0,np.array(decode.acausal_posterior.position)[-1]),vmax=0.02,cmap='bone_r',rasterized=True,origin='lower')
+    posterior_position_subset.plot(
+            x='time', y='position', ax=axes[0], rasterized=True, robust=True, cmap='bone_r')
+    
     axes[0].set_xticks(x_axis, x_axis)
     axes[0].set_aspect('auto')
     # decode.sel(time=time_slice).acausal_posterior.sum('state').plot(x='time', y='position',
@@ -448,7 +542,9 @@ def plot_decode_spiking(plottimes,t0t1,linear_position_xr,decode,lfp_xr,theta_xr
 
     if len(t0t1) > 0:
         t0t1_ = t0t1.ravel()
-        axes[0].set_title(title+'\n'+'first shade start time (s):'+str(t0t1_[0])+'\n'+'last shade end time (s):'+str(t0t1_[-1]),size=15)
+        first_shade_time = t0t1_[np.argwhere(t0t1_ >= plottimes[0]).ravel()[0]]
+        second_shade_time = t0t1_[np.argwhere(t0t1_ <= plottimes[1]).ravel()[-1]]
+        axes[0].set_title(title+'\n'+'first shade start time (s):'+str(first_shade_time)+'\n'+'last shade end time (s):'+str(second_shade_time),size=15)
     else:
         axes[0].set_title(title,size=15)
 
@@ -459,6 +555,11 @@ def plot_decode_spiking(plottimes,t0t1,linear_position_xr,decode,lfp_xr,theta_xr
     ymin,ymax = axes[0].get_ylim()
     axes[0].plot([plottimes[0]+0.01,plottimes[0]+0.01+0.05],[ymax-20,ymax-20],linewidth=10,color='firebrick',alpha=0.5)
     axes[0].text(plottimes[0]+0.01,ymax,'50 ms',fontsize=20)
+    
+    if head_direction_sign is not None:
+        axes[0].scatter(head_direction_sign.index,
+                 (head_direction_sign + 1) * 375 + 10, #so the top line is at 700
+                 s = 3, c = 'green')
 
     '''theta band LFP'''
     theta_d=np.array(theta_subset.to_array()).astype('int32').T
@@ -540,9 +641,17 @@ def plot_decode_spiking(plottimes,t0t1,linear_position_xr,decode,lfp_xr,theta_xr
 
 
     '''speed information'''
-    axes[4].plot(np.array(head_speed_subset.time),np.array(head_speed_subset.to_array()).ravel())
-    axes[4].set_ylim([0, 10])
+    head_speed_plot = np.array(head_speed_subset.to_array()).ravel()
+    axes[4].plot(np.array(head_speed_subset.time),head_speed_plot)
+    axes[4].set_ylim([0, np.nanmax(head_speed_plot)])
     axes[4].set_title('animal head speed cm/s')
+    
+    if plot_changeofmind:
+        for turn_ind in range(np.shape(turnaround)[0]):
+            axes[0].axvspan(turnaround[turn_ind][0], turnaround[turn_ind][1], color = "red", alpha = 0.2)
+            axes[1].axvspan(turnaround[turn_ind][0], turnaround[turn_ind][1], color = "red", alpha = 0.2)
+            axes[4].axvspan(turnaround[turn_ind][0], turnaround[turn_ind][1], color = "red", alpha = 0.2)
+        
 
     phi=head_orientation_subset.diff("head_orientation")
     axes[5].plot(np.array(phi.time),np.array(phi.head_orientation))
@@ -566,7 +675,8 @@ def plot_decode_sortedSpikes(nwb_copy_file_name,session_name,
                              ripple_consensus_trace=None,
                              title='',savefolder=[],savename=[],
                              likelihood=False,mua_thresh=0,causal = False,cell_color={},
-                             replay_type_time = None, replay_type = None):
+                             replay_type_time = None, replay_type = None, curation_id = 0,
+                             plot_changeofmind = False, turnaround = None, head_direction_sign = None):
     '''
     plotting submodule for plot_decode_spiking()
     plottimes: list of 2 numbers
@@ -576,12 +686,12 @@ def plot_decode_sortedSpikes(nwb_copy_file_name,session_name,
         for k in cell_peak.keys():
             cell_color[k] = 'C0'
 
-    fig, axes = plt.subplots(3, 1, figsize=(18, 14), sharex=True,
-                             constrained_layout=True, gridspec_kw={"height_ratios": [3,0.5,3]},)
+    fig, axes = plt.subplots(4, 1, figsize=(18, 14), sharex=True,
+                             constrained_layout=True, gridspec_kw={"height_ratios": [3,0.5,0.5,3]},)
     time_slice = slice(plottimes[0], plottimes[1])
 
-    (posterior_position_subset,posterior_state_subset,
-     linear_position_subset,lfp_subset,
+    (posterior_position_subset, posterior_state_subset,
+     linear_position_subset, lfp_subset,
      theta_subset,
      neural_subset,
      head_orientation_subset,head_speed_subset)=select_subset(plottimes,linear_position_xr,
@@ -591,26 +701,31 @@ def plot_decode_sortedSpikes(nwb_copy_file_name,session_name,
                                                               head_speed,head_orientation,likelihood,causal = causal)
 
     '''Decode and Position data'''
-    x_axis=np.arange(plottimes[0],plottimes[1],100)
-    if likelihood: #Not finished yet
-        axes[0].imshow(posterior_position_subset.T,extent=(
-            plottimes[0],plottimes[1],0,np.array(decode.acausal_posterior.position)[-1]),vmax=0.02,cmap='bone_r',origin='lower')
-    elif causal:
-        axes[0].imshow(posterior_position_subset.T,extent=(
-            plottimes[0],plottimes[1],0,np.array(decode.causal_posterior.position)[-1]),vmax=0.02,cmap='bone_r',rasterized=True,origin='lower')
-    else:
-        axes[0].imshow(posterior_position_subset.T,extent=(
-            plottimes[0],plottimes[1],0,np.array(decode.acausal_posterior.position)[-1]),vmax=0.02,cmap='bone_r',rasterized=True,origin='lower')
+    x_axis = np.arange(plottimes[0],plottimes[1],100)
+    #if likelihood:
+    posterior_position_subset.plot(
+            x='time', y='position', ax=axes[0], rasterized=True, robust=True, cmap='bone_r')
+        #axes[0].imshow(posterior_position_subset.T,extent=(
+        #    plottimes[0],plottimes[1],0,np.array(decode.likelihood.position)[-1]),vmax=0.02,cmap='bone_r',rasterized=True,origin='lower')
+    #elif causal:
+    #    axes[0].imshow(posterior_position_subset.T,extent=(
+    #        plottimes[0],plottimes[1],0,np.array(decode.causal_posterior.position)[-1]),vmax=0.02,cmap='bone_r',rasterized=True,origin='lower')
+    #else:
+    #    axes[0].imshow(posterior_position_subset.T,extent=(
+    #        plottimes[0],plottimes[1],0,np.array(decode.acausal_posterior.position)[-1]),vmax=0.02,cmap='bone_r',rasterized=True,origin='lower')
+
+    axes[0].scatter(linear_position_subset.time,
+                    np.array(linear_position_subset.linear_position),
+                    s=1, color='magenta', zorder=10)
     axes[0].set_xticks(x_axis, x_axis)
     axes[0].set_aspect('auto')
     # decode.sel(time=time_slice).acausal_posterior.sum('state').plot(x='time', y='position',
     #                                                                  ax=axes[0], robust=True, cmap='bone_r')
-    axes[0].scatter(linear_position_subset.time,
-                    np.array(linear_position_subset.linear_position),
-                    s=1, color='magenta', zorder=10)
 
-    t0t1_ = t0t1.ravel()
-    axes[0].set_title(title+'\n'+'first shade start time (s):'+str(t0t1_[0])+'\n'+'last shade end time (s):'+str(t0t1_[-1]),size=15)
+
+    if len(t0t1) > 0:
+        t0t1_ = t0t1.ravel()
+        axes[0].set_title(title+'\n'+'first shade start time (s):'+str(t0t1_[0])+'\n'+'last shade end time (s):'+str(t0t1_[-1]),size=15)
 
     '''decode state data'''
     posterior_state_subset.plot(x='time',hue='state',ax=axes[1])
@@ -619,40 +734,54 @@ def plot_decode_sortedSpikes(nwb_copy_file_name,session_name,
     ymin,ymax = axes[0].get_ylim()
     axes[0].plot([plottimes[0]+0.01,plottimes[0]+0.01+0.05],[ymax-20,ymax-20],linewidth=10,color='firebrick',alpha=0.5)
     axes[0].text(plottimes[0]+0.01,ymax,'50 ms',fontsize=20)
+    
+    if head_direction_sign is not None:
+        axes[0].scatter(head_direction_sign.index,
+                 (head_direction_sign + 1) * 375 + 10, #so the top line is at 700
+                 s = 3, c = 'green')
 
     '''theta band LFP'''
-    #theta_d=np.array(theta_subset.to_array()).astype('int32').T
-    #theta_t=np.array(theta_subset.time)
-    #axes[2].plot(theta_t,theta_d)
-    #axes[2].set_title('theta LFP')
+    theta_d=np.array(theta_subset.to_array()).astype('int32').T
+    theta_t=np.array(theta_subset.time)
+    axes[2].plot(theta_t,theta_d)
+    axes[2].set_title('theta LFP')
 
     '''spike data and broad band LFP'''
-
+    axes_id = 3
     cells = list(cell_peak.keys())
     e_old = -1
     for cell in cells:
         e = cell[0]
         u = cell[1]
         if e != e_old:
-            nwb_units = electrode_unit(nwb_copy_file_name,session_name,e)
+            nwb_units = electrode_unit(nwb_copy_file_name,session_name,e,curation_id = curation_id)
 
         spike_times = nwb_units.loc[u].spike_times
         spike_times = spike_times[np.logical_and(spike_times >= plottimes[0],spike_times <= plottimes[1])]
 
-        axes[2].scatter(spike_times, np.zeros(len(spike_times)) + cell_peak[(e,u)],rasterized=True, marker='|', color = cell_color[(e,u)],alpha = 0.5)
-        axes[2].set_title('spiking, each row is a cell',size=10)
+        axes[axes_id].scatter(spike_times, np.zeros(len(spike_times)) + cell_peak[(e,u)],rasterized=True, marker='|', color = cell_color[(e,u)],alpha = 0.5)
+        if len(spike_times) > 0:
+            axes[axes_id].text(spike_times[0],cell_peak[(e,u)],str((e,u)),rotation = 10, color = cell_color[(e,u)])
+        else:
+            axes[axes_id].text(plottimes[0],cell_peak[(e,u)],str((e,u)),rotation = 10, color = cell_color[(e,u)])
+        axes[axes_id].set_title('spiking, each row is a cell',size=10)
         e_old = e.copy()
+    axes[axes_id].scatter(linear_position_subset.time,
+                    np.array(linear_position_subset.linear_position),
+                    s=1, color='magenta', zorder=10)
 
     """well locations"""
     linear_map,node_location=get_linearization_map()
-    for junctions in linear_map[:,1]:
-        axes[2].axhline(junctions, linewidth = 0.2, linestyle = '-.',color = [0.2,0.2,0.2])
-    for n in node_location.keys():
-        axes[2].axhline(node_location[n], linewidth = 1, linestyle = '-')
+    for axes_id in [3]:
+        for junctions in linear_map[:,1]:
+            axes[axes_id].axhline(junctions, linewidth = 0.2, linestyle = '-.',color = [0.2,0.2,0.2])
+        for n in node_location.keys():
+            axes[axes_id].axhline(node_location[n], linewidth = 1, linestyle = '-')
 
+    axes_id = 3
     graph = TrackGraph() & {'track_graph_name': '4 arm lumped 2023'}
     graph.plot_track_graph_as_1D(
-    ax=axes[2],
+    ax=axes[axes_id],
     axis='y',
     other_axis_start = plottimes[0]-0.1)
 
@@ -687,20 +816,43 @@ def plot_decode_sortedSpikes(nwb_copy_file_name,session_name,
         print('here 666')
 
 
-    for i in range(3):
+    for i in range(4):
         for j in range(np.shape(t0t1)[0]):
             axes[i].axvspan(t0t1[j,0],t0t1[j,1], zorder=-1, alpha=0.5, color='paleturquoise')
+            
+    if plot_changeofmind:
+        for turn_ind in range(np.shape(turnaround)[0]):
+            axes[0].axvspan(turnaround[turn_ind][0], turnaround[turn_ind][1], color = "red", alpha = 0.2)
+            axes[3].axvspan(turnaround[turn_ind][0], turnaround[turn_ind][1], color = "red", alpha = 0.2)
 
 
     if len(savefolder)>0:
+        if likelihood:
+            savename = savename + "_likelihood"
         plt.savefig(os.path.join(savefolder,savename+'.pdf'),format="pdf",bbox_inches='tight',dpi=200)
         #plt.savefig(os.path.join(exampledir,'ripple_'+str(ripple_num)+'.png'),bbox_inches='tight',dpi=300)
 
-def select_subset_helper(xr_ob,plottimes):
-    xr_ob=xr_ob.sel(
+def select_subset_helper(xr_ob,plottimes,target_len = 0,epsilon = 0):
+    xr_ob = xr_ob.sel(
         time=xr_ob.time[
             np.logical_and(xr_ob.time>=plottimes[0],xr_ob.time<=plottimes[1])])
+    if target_len > 0 and len(xr_ob.time) > 0:
+        xr_ob2 = xr_ob.isel(time= slice(0,target_len))
+        if (np.abs(xr_ob2.time[0]-plottimes[0])<=epsilon) and (np.abs(xr_ob2.time[-1]-plottimes[1])<=epsilon):
+            return xr_ob2
+        else:
+            print("some missing position data")
+            return xr_ob
+        
     return xr_ob
+
+def select_subset_helper_pd(xr_ob,plottimes):
+    # assumes index is time, in seconds
+    (t0_peak,t1_peak) = (plottimes[0]-0.001, plottimes[1]+0.001)
+    subset_ind = (xr_ob.index >= t0_peak) & (xr_ob.index <= t1_peak)
+    subset = xr_ob.loc[subset_ind]
+        
+    return subset
 
 
 def select_subset(plottimes,linear_position_xr,results,lfp_xr,theta_xr,

@@ -114,6 +114,7 @@ class Session(SpyglassMixin, dj.Imported):
                 "experiment_description": nwbf.experiment_description,
             },
             skip_duplicates=True,
+            allow_direct_insert=True,  # for populate_all_common
         )
 
         logger.info("Skipping Apparatus for now...")

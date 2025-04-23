@@ -112,10 +112,11 @@ class Curation(SpyglassMixin, dj.Manual):
 
         # generate a unique number for this curation
         id = (Curation & sorting_key).fetch("curation_id")
-        if len(id) > 0:
-            curation_id = max(id) + 1
-        else:
-            curation_id = 0
+        curation_id = parent_curation_id + 1
+        #if len(id) > 0:
+        #    curation_id = max(id) + 1
+        #else:
+        #    curation_id = 0
 
         # convert unit_ids in labels to integers for labels from sortingview.
         new_labels = {int(unit_id): labels[unit_id] for unit_id in labels}
@@ -513,7 +514,7 @@ class QualityMetrics(SpyglassMixin, dj.Computed):
             qm[metric_name] = metric
         qm_name = self._get_quality_metrics_name(key)
         key["quality_metrics_path"] = str(
-            Path(waveform_dir) / Path(qm_name + ".json")
+            Path(waveforms_dir) / Path(qm_name + ".json")
         )
         # save metrics dict as json
         logger.info(f"Computed all metrics: {qm}")

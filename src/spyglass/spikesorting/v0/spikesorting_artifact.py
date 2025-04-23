@@ -273,9 +273,14 @@ def _get_artifact_times(
         (len(artifact_intervals), 2), dtype=np.float64
     )
     for interval_idx, interval in enumerate(artifact_intervals):
+        valid_timestamps0 = valid_timestamps[interval[0]]
+        valid_timestamps1 = valid_timestamps[interval[1]]
+        if np.isnan(valid_timestamps0) or np.isnan(valid_timestamps1):
+            continue
+        
         artifact_intervals_s[interval_idx] = [
-            valid_timestamps[interval[0]] - half_removal_window_s,
-            valid_timestamps[interval[1]] + half_removal_window_s,
+            valid_timestamps0 - half_removal_window_s,
+            valid_timestamps1 + half_removal_window_s,
         ]
     # make the artifact intervals disjoint
     artifact_intervals_s = reduce(_union_concat, artifact_intervals_s)

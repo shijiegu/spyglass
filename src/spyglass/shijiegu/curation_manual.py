@@ -8,8 +8,9 @@ import matplotlib.pyplot as plt
 import matplotlib.patheffects as PathEffects
 from sklearn import svm
 from spyglass.common.common_interval import IntervalList
+from itertools import combinations
 
-pair=[[0,1],[0,2],[0,3],[1,2],[1,3],[2,3]]  #tetrode channel pairs
+
 color_palet = 1-np.array([[1,0.6,0],[0.7,0.6,0.4],[0.6,0.8,0.3],
                           [0,0.6,.3],[0,0,1],[0,0.6,1],[0,0.7,0.7],
                           [0.7,0,0.7],[0.7,0.4,1]]);
@@ -104,7 +105,8 @@ def load_waveforms(nwb_copy_file_name,session_name,
     peak={}
     timestamps={}
     for unit_id in nwb_units.index:
-        wave=UnitMarks._get_peak_amplitude(
+        #wave=UnitMarks._get_peak_amplitude(
+        wave=_get_peak_amplitude(
             waveform=we.get_waveforms(unit_id),
             peak_sign="neg",
             estimate_peak_time=True)
@@ -136,7 +138,8 @@ def load_peak_amp(nwb_copy_file_name,session_name,
     waves={}
     timestamps={}
     for unit_id in nwb_units.index:
-        wave=UnitMarks._get_peak_amplitude(
+        #wave=UnitMarks._get_peak_amplitude(
+        wave = _get_peak_amplitude(
             waveform=we.get_waveforms(unit_id),
             peak_sign="neg",
             estimate_peak_time=True)
@@ -149,19 +152,37 @@ def load_peak_amp(nwb_copy_file_name,session_name,
         timestamps[unit_id] = timestamp
     return waves, timestamps
 
-def plot_spray_window(waves):
-    color_map = {}
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+import matplotlib.colors as colors
+cmap = plt.cm.seismic  # Example colormap
+norm = colors.LogNorm(vmin=1/3, vmax=3, clip=True)
+
+def plot_spray_window(waves,color_map = {}, grey_units = None):
+    # grey_units will be plotted grey
+    
     fig,axes=plt.subplots(1,6,figsize=(24,4),sharex=True,sharey=True)
 
     ## get amplitude
     color_ind=0
-    for u in waves.keys():#noiseUnits:#nwb_units.index:1,3,5,12,6,
-        color_map[u] = color_palet[color_ind]
+    
+    all_units = list(waves.keys())
+    if grey_units is not None:
+        all_units = np.setdiff1d(all_units, grey_units)
+        all_units = np.concatenate((grey_units, all_units))
+    for u in all_units:#noiseUnits:#nwb_units.index:1,3,5,12,6,
+        goodChannelNumber = waves[u].shape[1]
+        pair = list(combinations(range(goodChannelNumber), 2)) #tetrode channel pairs
+        # something like [[0,1],[0,2],[0,3],[1,2],[1,3],[2,3]]  
+        
+        if np.isin(u,grey_units):
+            color_map[u] = [0.5,0.5,0.5]
+        elif not u in color_map.keys():
+            color_map[u] = color_palet[color_ind]
 
-        for p in range(6):
+        for p in range(len(pair)):
             e1,e2=pair[p]
             # plot every other spike
-            _ = axes[p].scatter(-waves[u][::2,e1],-waves[u][::2,e2], color=color_palet[color_ind], s=4, alpha = 0.2)
+            _ = axes[p].scatter(-waves[u][::2,e1],-waves[u][::2,e2], color=color_map[u], s=4, alpha = 0.2)
 
             # plot unit name
             centroid_x = np.mean(-waves[u][:,e1])
@@ -173,7 +194,13 @@ def plot_spray_window(waves):
 
     for p in range(6):
         axes[p].set_xlabel("uV")
+        axes[p].set_xlim([-200,800])
         axes[p].set_ylabel("uV")
+        axes[p].set_ylim([-200,800])
+        
+    divider = make_axes_locatable(axes[p])
+    cax = divider.append_axes('right', size='5%', pad=0.05)
+    fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), cax=cax, orientation='vertical')
     plt.close()
 
     return fig, axes, color_map
@@ -445,6 +472,7 @@ def show_plot(f, title):
     canvas_manager.canvas.figure = f
     managed_fig.set_canvas(canvas_manager.canvas)
     plt.suptitle(title,fontsize = 20)
+    return managed_fig
 
 def show_waveform(extractor,units):
     if len(units) == 0:
@@ -492,7 +520,7 @@ def end_of_session_check(nwb_copy_file_name,session_name,parent_curation_id):
 
         sort_group_ids = np.array(sort_group_ids)
 
-    key.pop("sort_group_id")
+    #key.pop("sort_group_id")
     key["curation_id"] = parent_curation_id + 1
     sort_group_ids_processed = np.unique((sgs.CuratedSpikeSorting() & key).fetch("sort_group_id"))
 
@@ -531,3 +559,36 @@ def end_of_day_check(nwb_copy_file_name,parent_curation_id):
                                          intervals_processed)
         print(f"missing session {missing_electrode}")
         return 0
+
+def _get_peak_amplitude(waveform, peak_sign="neg", estimate_peak_time=False):
+    """
+     Returns the amplitudes of all channels at the time of the peak
+    amplitude across channels.
+    Parameters
+    ----------
+    waveform : np.array
+        array-like, shape (n_spikes, n_time, n_channels)
+        peak_sign : str, optional
+            One of 'pos', 'neg', 'both'. Direction of the peak in the waveform
+        estimate_peak_time : bool, optional
+            Find the peak times for each spike because some spikesorters do not
+            align the spike time (at index n_time // 2) to the peak
+        Returns
+        -------
+        peak_amplitudes : array-like, shape (n_spikes, n_channels)
+    """
+    if estimate_peak_time:
+        if peak_sign == "neg":
+            peak_inds = np.argmin(np.min(waveform, axis=2), axis=1)
+        elif peak_sign == "pos":
+            peak_inds = np.argmax(np.max(waveform, axis=2), axis=1)
+        elif peak_sign == "both":
+            peak_inds = np.argmax(np.max(np.abs(waveform), axis=2), axis=1)
+
+        # Get mode of peaks to find the peak time
+        values, counts = np.unique(peak_inds, return_counts=True)
+        spike_peak_ind = values[counts.argmax()]
+    else:
+        spike_peak_ind = waveform.shape[1] // 2
+
+    return waveform[:, spike_peak_ind]

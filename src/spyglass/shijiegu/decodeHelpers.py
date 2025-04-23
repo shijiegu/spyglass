@@ -51,25 +51,44 @@ def runSessionNames(nwb_copy_file_name):
 
     for i in range(len(epochNames)):
         interval=epochNames[i]
-        if interval[7:10]=='Ses':
+        if 'Sess' in interval.split('_')[1][3:9]:
             session_interval.append(interval)
             position_interval.append(positionNames[i])
     return session_interval, position_interval
 
-def decodePrepMasterSession(nwb_copy_file_name,e,populate = True):
+def sleepSessionNames(nwb_copy_file_name):
+    # select position timestamps, only maze sessions are selected
 
-    session_interval, position_interval = runSessionNames(nwb_copy_file_name)
+    epochNames = (EpochPos & {'nwb_file_name':nwb_copy_file_name}).fetch('epoch_name')
+    positionNames = (EpochPos & {'nwb_file_name':nwb_copy_file_name}).fetch('position_interval')
+
+    position_interval=[]
+    session_interval=[]
+
+    for i in range(len(epochNames)):
+        interval=epochNames[i]
+        if 'Sleep' in interval[6:13]:
+            session_interval.append(interval)
+            position_interval.append(positionNames[i])
+    return session_interval, position_interval
+
+def decodePrepMasterSession(nwb_copy_file_name,session_name,populate = True):
+
+    #session_interval, position_interval = runSessionNames(nwb_copy_file_name)
 
     """
     Ephys: UnitMarksIndicator
     """
-    sorting_keys = thresholder_sort(nwb_copy_file_name,session_interval[e],populate)
+    position_interval = (EpochPos & {'nwb_file_name':nwb_copy_file_name,
+                                 "epoch_name":session_name}).fetch1('position_interval')
+    
+    sorting_keys = thresholder_sort(nwb_copy_file_name,session_name,populate)
     mark_parameters_keys = populateUnitMarks(sorting_keys)
 
     positionIntervalList = (
         IntervalList &
         {'nwb_file_name': nwb_copy_file_name,
-         'interval_list_name': position_interval[e]})
+         'interval_list_name': session_name})
 
     marks_selection = ((UnitMarks & mark_parameters_keys) * positionIntervalList)
     marks_selection = (pd.DataFrame(marks_selection)
@@ -85,19 +104,19 @@ def decodePrepMasterSession(nwb_copy_file_name,e,populate = True):
     """
     linear_position_df = (IntervalLinearizedPosition() &
         {'nwb_file_name': nwb_copy_file_name,
-        'interval_list_name': position_interval[e],
+        'interval_list_name': position_interval,
         'position_info_param_name': 'default_decoding'}
         ).fetch1_dataframe()
     position_df = (IntervalPositionInfo &
         {'nwb_file_name': nwb_copy_file_name,
-        'interval_list_name': position_interval[e],
+        'interval_list_name': position_interval,
         'position_info_param_name': 'default_decoding'}
                     ).fetch1_dataframe()
 
     # Remove Data before 1st trial and after last trial
     StateScript = pd.DataFrame(
         (TrialChoice & {'nwb_file_name':nwb_copy_file_name,
-                        'epoch_name':session_interval[e]}).fetch1('choice_reward'))
+                        'epoch_name':session_name}).fetch1('choice_reward'))
 
     trial_1_t = StateScript.loc[1].timestamp_O
     trial_last_t = StateScript.loc[len(StateScript)-1].timestamp_O
@@ -108,16 +127,34 @@ def decodePrepMasterSession(nwb_copy_file_name,e,populate = True):
     Intervals
     """
     intersect_interval = intersectValidIntervals(nwb_copy_file_name,
-                                                session_interval[e],position_interval[e])
+                                                session_name,position_interval)
     marks_=[]
     linear_position_df_=[]
     position_df_ =[]
     for i in range(len(intersect_interval)):
         valid_time_slice = slice(intersect_interval[i][0], intersect_interval[i][1])
+        
+        linear_position_df_tmp = linear_position_df.loc[valid_time_slice]
+        position_df_tmp = position_df.loc[valid_time_slice]
+        marks_tmp = marks.sel(time=valid_time_slice)
+        
+        # there are sometimes just 1-2ms off between behavior and neural data
+        if len(linear_position_df_tmp) > 2:
+            assert linear_position_df_tmp.index[0] - float(marks_tmp.time[0]) <= 0.003
+            assert linear_position_df_tmp.index[-1] - float(marks_tmp.time[-1]) <= 0.003
+        
+            final_length = np.min([len(linear_position_df_tmp),marks_tmp.shape[0]])
+            linear_position_df_tmp = linear_position_df_tmp.iloc[:final_length]
+            position_df_tmp = position_df_tmp.iloc[:final_length]
+            marks_tmp = marks_tmp.isel(time = np.arange(final_length))
+        
+            assert len(linear_position_df_tmp) == marks_tmp.shape[0]
+            assert linear_position_df_tmp.index[0] - float(marks_tmp.time[0]) <= 0.003
+            assert linear_position_df_tmp.index[-1] - float(marks_tmp.time[-1]) <= 0.003
 
-        linear_position_df_.append(linear_position_df.loc[valid_time_slice])
-        position_df_.append(position_df.loc[valid_time_slice])
-        marks_.append(marks.sel(time=valid_time_slice))
+            linear_position_df_.append(linear_position_df_tmp)
+            position_df_.append(position_df_tmp)
+            marks_.append(marks_tmp)
 
     marks=xr.concat(marks_,dim='time')
     linear_position_df=pd.concat(linear_position_df_)
@@ -129,19 +166,19 @@ def decodePrepMasterSession(nwb_copy_file_name,e,populate = True):
     """save result"""
     animal = nwb_copy_file_name[:5]
     marks_path=os.path.join(f'/cumulus/shijie/recording_pilot/{animal}/decoding',
-                             nwb_copy_file_name+'_'+session_interval[e]+'_marks.nc')
+                             nwb_copy_file_name+'_'+session_name+'_marks.nc')
     marks.to_netcdf(marks_path)
 
     position1d_path=os.path.join(f'/cumulus/shijie/recording_pilot/{animal}/decoding',
-                             nwb_copy_file_name+'_'+session_interval[e]+'_1dposition.csv')
+                             nwb_copy_file_name+'_'+session_name+'_1dposition.csv')
     linear_position_df.to_csv(position1d_path)
 
     position2d_path=os.path.join(f'/cumulus/shijie/recording_pilot/{animal}/decoding',
-                             nwb_copy_file_name+'_'+session_interval[e]+'_2dposition.csv')
+                             nwb_copy_file_name+'_'+session_name+'_2dposition.csv')
     position_df.to_csv(position2d_path)
 
     key={'nwb_file_name':nwb_copy_file_name,
-     'interval_list_name':session_interval[e],
+     'interval_list_name':session_name,
      'marks':marks_path,
      'position_1d':position1d_path,
      'position_2d':position2d_path}
@@ -160,7 +197,7 @@ def thresholder_sort(nwb_copy_file_name,sort_interval_name,populate=True):
 
     #, and there should be 2 entries, one from left cannula (group 100), and one from right cannula (group 101)
     artifact_removed_name_list=artifact_key.fetch('artifact_removed_interval_list_name')
-    assert len(artifact_removed_name_list)==2
+    #assert len(artifact_removed_name_list)==2
 
     artifact_time_list=[]
     artifact_removed_time_list=[]
@@ -168,20 +205,35 @@ def thresholder_sort(nwb_copy_file_name,sort_interval_name,populate=True):
         artifact_time_list.append((ArtifactDetection() & {'nwb_file_name' : nwb_copy_file_name,'artifact_removed_interval_list_name':artifact_removed_name}).fetch1('artifact_times'))
         artifact_removed_time_list.append((IntervalList() & {'nwb_file_name' : nwb_copy_file_name,'interval_list_name':artifact_removed_name}).fetch1('valid_times'))
 
-    artifact_time_list=interval_union(artifact_time_list[0],artifact_time_list[1])
-
-    artifact_removed_time_list=interval_list_intersect(
-        np.array(artifact_removed_time_list[0]),np.array(artifact_removed_time_list[1]))
-
     """remove time before the rat is on track"""
-    StateScript = pd.DataFrame(
-        (TrialChoice & {'nwb_file_name':nwb_copy_file_name,
-                        'epoch_name':sort_interval_name}).fetch1('choice_reward')
-    )
-    trial_1_t = StateScript.loc[1].timestamp_O
-    trial_last_t = StateScript.loc[len(StateScript)-1].timestamp_O
+    statescript_key = {'nwb_file_name':nwb_copy_file_name,
+                        'epoch_name':sort_interval_name}
+    trial_1_t = None
+    if len((TrialChoice & statescript_key)) > 0:
+        StateScript = pd.DataFrame(
+        (TrialChoice & statescript_key).fetch1('choice_reward')
+        )
+        trial_1_t = StateScript.loc[1].timestamp_O
+        trial_last_t = StateScript.loc[len(StateScript)-1].timestamp_O
+        
+    if len(artifact_time_list) > 1:
+        artifact_time_list=interval_union(artifact_time_list[0],artifact_time_list[1])
+        
+        artifact_removed_time_list=interval_list_intersect(
+            np.array(artifact_removed_time_list[0]),np.array(artifact_removed_time_list[1]))
+        
+        if trial_1_t is not None:
+            artifact_time_list=interval_union(artifact_time_list,
+                                            np.array([[artifact_time_list[0][0],trial_1_t],
+                                                    [trial_last_t,artifact_time_list[-1][-1]]]
+                                                    ).reshape((-1,2)))
+            artifact_removed_time_list=interval_list_intersect(artifact_removed_time_list,np.array([trial_1_t,trial_last_t]))
 
-    artifact_removed_time_list=interval_list_intersect(artifact_removed_time_list,np.array([trial_1_t,trial_last_t]))
+    else:
+        artifact_removed_time_list = np.squeeze(np.array(artifact_removed_time_list))
+        artifact_time_list = np.squeeze(np.array(artifact_time_list))
+        artifact_removed_time_list = artifact_removed_time_list.reshape((-1,2))
+        
 
     # find tetrodes
     tetrode_with_cell=np.unique((SpikeSortingRecordingSelection & {'nwb_file_name':nwb_copy_file_name}).fetch('sort_group_id'))
@@ -196,7 +248,7 @@ def thresholder_sort(nwb_copy_file_name,sort_interval_name,populate=True):
                     'sort_interval_name' : sort_interval_name,
                     'sort_group_id' : tetrode,
                     'preproc_params_name': 'franklab_tetrode_hippocampus',
-                    'team_name': 'Shijie Gu'}
+                    'team_name': 'SequenceTask'}#'SequenceTask'} #'team_name': 'Shijie Gu' or 'SequenceTask'
         artifact_key['artifact_params_name'] = artifact_params_name
 
         if populate:
@@ -218,7 +270,8 @@ def thresholder_sort(nwb_copy_file_name,sort_interval_name,populate=True):
             print('inserting into IntervalList')
             IntervalList().insert1({'nwb_file_name' : nwb_copy_file_name,
                                'interval_list_name':artifact_name,
-                               'valid_times':artifact_removed_time_list},skip_duplicates=True)
+                               'valid_times':artifact_removed_time_list},replace=True)
+                               #'valid_times':artifact_removed_time_list},skip_duplicates=True)
 
         print('done inserting into IntervalList')
 

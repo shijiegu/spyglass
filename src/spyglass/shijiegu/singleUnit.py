@@ -25,6 +25,7 @@ import matplotlib.pyplot as plt
 from scipy import signal
 from scipy.linalg import norm
 
+from spyglass.common import IntervalList, interval_list_intersect
 from spyglass.shijiegu.helpers import interval_union
 from spyglass.shijiegu.Analysis_SGU import TrialChoice,RippleTimes,EpochPos,get_linearization_map
 from spyglass.shijiegu.load import load_run_sessions
@@ -33,8 +34,84 @@ from spyglass.common.common_position import IntervalPositionInfo
 from spyglass.linearization.v0.main import IntervalLinearizedPosition
 from spyglass.shijiegu.helpers import interpolate_to_new_time
 
-SNR_THRESHOLD = 8
+SNR_THRESHOLD = 5
 
+def get_nwb_units(nwb_copy_file_name,session_name,sort_group_ids_with_good_cell,curation_id = 0):
+    """kept for legacy, but use the function session_unit() in singleUnit instead"""
+    nwb_units_all = {}
+    for sort_group_id in sort_group_ids_with_good_cell:
+
+        nwb_units = electrode_unit(nwb_copy_file_name,session_name,sort_group_id,curation_id = curation_id)
+        # if there are no neurons that pass manual curation
+        # nwb_units will be None.
+        if nwb_units is not None:
+            nwb_units_all[sort_group_id] = nwb_units
+
+    return nwb_units_all
+
+def qualityMetric_master(nwb_copy_file_name,session_name,parent_curation_id = -1):
+    if parent_curation_id <= 0:
+        keys = (SpikeSorting() & {"nwb_file_name":nwb_copy_file_name,
+                                "sorter":"mountainsort4",
+                                "sort_interval_name":session_name,
+                                }).fetch(as_dict=True)
+        for k in keys:
+            fillQualityMetric(k, parent_curation_id = parent_curation_id)
+        return None
+    
+    elif parent_curation_id >= 1:
+        keys = (Curation & {"nwb_file_name": nwb_copy_file_name,
+                            "sorter":"mountainsort4",
+                            "curation_id":parent_curation_id}).fetch(as_dict=True)
+        for k in keys:
+            fillQualityMetric(k, parent_curation_id = parent_curation_id)
+        return None
+    
+def fillQualityMetric(k, parent_curation_id = -1):
+    """
+    input k is spikesorting key: 
+            keys = (SpikeSorting() & {"nwb_file_name":nwb_copy_file_name,"sorter":"mountainsort4"}).fetch(as_dict=True)
+    output is curation key.
+    if parent_curation_id >=1: do not insert more curation
+    """
+    
+    for key_names in ["sorting_path","time_of_sort","parent_curation_id",
+                      "curation_labels","merge_groups","quality_metrics","description","time_of_creation"]:
+        if key_names in k:
+            k.pop(key_names)
+    
+    # Curation
+    if parent_curation_id <= 0:
+        ck = Curation.insert_curation(k,
+                                        parent_curation_id = parent_curation_id,
+                                        labels=None,
+                                        merge_groups=None,
+                                        metrics=None,
+                                        description=None)
+        assert ck["curation_id"] == parent_curation_id + 1
+    else:
+        ck = k
+        assert ck["curation_id"] == parent_curation_id
+    
+    # Waveform
+    ck["waveform_params_name"] = "default_clusterless"
+    WaveformSelection.insert1(ck,skip_duplicates=True)
+    Waveforms.populate(ck)
+    
+    # QualityMetrics
+    ck["metric_params_name"] = "franklab_default3"
+    MetricSelection.insert1(ck,skip_duplicates=True)
+    QualityMetrics.populate(ck)
+    
+    # CuratedSpikeSorting
+    ck.pop("waveform_params_name")
+    ck.pop("metric_params_name")
+    CuratedSpikeSortingSelection.insert1(ck,skip_duplicates=True)
+    CuratedSpikeSorting().populate(ck)
+    
+    return ck
+    
+    
 def do_mountainSort(nwb_copy_file_name,session_name):
     tetrode_with_cell=np.unique((SpikeSortingRecordingSelection & {'nwb_file_name':nwb_copy_file_name}).fetch('sort_group_id'))
     tetrode_with_cell=np.setdiff1d(tetrode_with_cell,[100,101])
@@ -48,16 +125,16 @@ def do_mountainSort(nwb_copy_file_name,session_name):
             if k['artifact_removed_interval_list_name'][-15:] == 'track_time_only':
                 artifact_key = k
 
-        artifact_key.pop('artifact_params_name')
-        artifact_key.pop('artifact_times')
-        artifact_key.pop('artifact_removed_valid_times')
-        artifact_key['sorter'] = "mountainsort4"
-        artifact_key['sorter_params_name'] = "CA1_tet_Shijie"
+                artifact_key.pop('artifact_params_name')
+                artifact_key.pop('artifact_times')
+                artifact_key.pop('artifact_removed_valid_times')
+                artifact_key['sorter'] = "mountainsort4"
+                artifact_key['sorter_params_name'] = "CA1_tet_Shijie_whiten"
 
-        SpikeSortingSelection.insert1(artifact_key, skip_duplicates=True)
-        SpikeSorting.populate(artifact_key)
+                SpikeSortingSelection.insert1(artifact_key, skip_duplicates=True)
+                SpikeSorting.populate(artifact_key)
 
-def session_unit(nwb_copy_file_name,session_name):
+def session_unit(nwb_copy_file_name,session_name,curation_id = 0,return_cell_list = False):
     """return nwb_units for only large SNR units"""
     key = {"nwb_file_name": nwb_copy_file_name,
        "sorter":"mountainsort4",
@@ -67,33 +144,52 @@ def session_unit(nwb_copy_file_name,session_name):
     sort_group_ids = np.unique((QualityMetrics & key).fetch("sort_group_id"))
 
     sort_group_ids_with_good_cell = []
+    cell_list = []
+    
     for sort_group_id in sort_group_ids:
-        nwb_units = electrode_unit(nwb_copy_file_name,session_name,sort_group_id)
-        if len(nwb_units)==0:
+        nwb_units = electrode_unit(nwb_copy_file_name,session_name,sort_group_id,curation_id=curation_id)
+        if nwb_units is None or len(nwb_units)==0:
             continue
         nwb_units_all[sort_group_id] = nwb_units
         sort_group_ids_with_good_cell.append(sort_group_id)
+        
+        for cell in nwb_units.index:
+            cell_list.append((sort_group_id, cell))
+        
+    if return_cell_list:
+        return nwb_units_all, sort_group_ids_with_good_cell, cell_list
     return nwb_units_all, sort_group_ids_with_good_cell
 
-def electrode_unit(nwb_copy_file_name,session_name,sort_group_id):
+def electrode_unit(nwb_copy_file_name,session_name,
+                   sort_group_id,
+                   curation_id = 0):
     """return nwb_units for only large SNR units"""
 
     key = {"nwb_file_name": nwb_copy_file_name,
        "sorter":"mountainsort4",
-       "sort_interval_name":session_name}
+       "sort_interval_name":session_name,
+       "curation_id":curation_id}
 
     key["sort_group_id"] = sort_group_id
 
+    nwb_units_query = (CuratedSpikeSorting() & key).fetch_nwb()[0]
+    
+    if len(nwb_units_query['units_object_id']) == 0:
+        return None
+    nwb_units = nwb_units_query["units"]
+    if len(nwb_units) == 0:
+        return None
+    
+    if curation_id > 0: #only auto curation uses heuristics
+        return nwb_units
+    
     metrics_json_path=(QualityMetrics & key).fetch1("quality_metrics_path")
 
     # Opening JSON file
     with open(metrics_json_path) as json_file:
         metrics_json = json.load(json_file)
     snr = metrics_json['snr']
-
-    nwb_units = (CuratedSpikeSorting() & key).fetch_nwb()[0]["units"]
-    if len(nwb_units) == 0:
-        return None
+    
     SPIKECOUNT_THRESHOLD = 14 * np.diff(nwb_units.iloc[0].sort_interval.ravel()) #14Hz for half an hour session
 
     accepted_units1=[unit_id for unit_id in nwb_units.index if snr[str(unit_id)] >= SNR_THRESHOLD] #SNR_THRESHOLD = 10
@@ -105,21 +201,24 @@ def electrode_unit(nwb_copy_file_name,session_name,sort_group_id):
 
     return nwb_units
 
-def find_spikes(electrodes_units,cell_list,axis):
+def find_spikes(electrodes_units,cell_list,axis,count = 1):
     """
     Get firing rate matrix over axis
     electrodes_units is a dictionary where keys are electrode
     cell_list is a list of cells, each is a tuple (electrode, unit),
         the returned matrix will be in this order in column
+    if count: return count matrix
+    if not count: return firing rate matrix
     """
     DELTA_T = axis[1] - axis[0]
     firing_matrix = np.zeros((len(axis)-1,len(cell_list)))
     for i in range(len(cell_list)):
         (e, u) = cell_list[i]
-        firing_matrix[:,i], _ = np.histogram(electrodes_units[e].loc[u].spike_times,axis)
+        firing_matrix[:,i], time_bins = np.histogram(electrodes_units[e].loc[u].spike_times,axis)
+    if count:
+        return firing_matrix, time_bins[:-1]
     firing_matrix = firing_matrix / DELTA_T
-
-    return firing_matrix
+    return firing_matrix, time_bins[:-1]
 
 def xcorr(firing_matrix):
     xcorr_matrix = []
@@ -263,13 +362,13 @@ def RippleTime2FiringRate(nwb_units,ripple_times,accepted_units,fragFlag = True)
 def findWaveForms(nwb_copy_file_name,epoch_name,eletrode,curation_id = 0):
     """returns waveform_extractor, which has memmap for waveforms"""
 
-    #artifact_name = f'{nwb_copy_file_name}_{epoch_name}_{eletrode}_franklab_tetrode_hippocampus_ampl_1500_prop_075_1ms_artifact_removed_valid_times_track_time_only'
-    artifact_name = f'{nwb_copy_file_name}_{epoch_name}_{eletrode}_franklab_tetrode_hippocampus_ampl_1500_prop_075_1ms_artifact_removed_valid_times'
+    artifact_name = f'{nwb_copy_file_name}_{epoch_name}_{eletrode}_franklab_tetrode_hippocampus_ampl_1500_prop_075_1ms_artifact_removed_valid_times_track_time_only'
+    #artifact_name = f'{nwb_copy_file_name}_{epoch_name}_{eletrode}_franklab_tetrode_hippocampus_ampl_1500_prop_075_1ms_artifact_removed_valid_times'
     key = {'nwb_file_name':nwb_copy_file_name,
            'sort_interval_name':epoch_name,
            "sorter":"mountainsort4",
            'sort_group_id':eletrode,
-           'artifact_removed_interval_list_name':artifact_name,
+           #'artifact_removed_interval_list_name':artifact_name,
            "curation_id":curation_id
            }
 

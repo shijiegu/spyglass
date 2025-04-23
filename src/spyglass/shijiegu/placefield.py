@@ -62,13 +62,16 @@ def raster_field(nwb_copy_file_name, session_name, pos_name, electrode, unit):
 
     return pos2d, pos2d_spike_time, total_spike_count
 
-def place_field(nwb_copy_file_name, session_name, pos_name, electrode, unit, BINWIDTH = 2, sigma = 2, curation_id = 0):
+def place_field(nwb_copy_file_name, session_name, pos_name, electrode, unit,
+                BINWIDTH = 2, sigma = 2, curation_id = 0, nwb_units = None, immobility = False, normalize = True):
     # default is 2 cm bins, smoothed by 2 bins = 4 cm
 
-    nwb_units,extractor = findWaveForms(nwb_copy_file_name,session_name,electrode,curation_id)
+    if nwb_units is None:
+        nwb_units,extractor = findWaveForms(nwb_copy_file_name,session_name,electrode,curation_id)
 
     # get spike time
     spike_time = nwb_units.loc[unit].spike_times
+    print("spike num:", len(spike_time))
 
     # get linearized location and 2D position
     pos1d = (IntervalLinearizedPosition() & {'nwb_file_name': nwb_copy_file_name,
@@ -97,14 +100,24 @@ def place_field(nwb_copy_file_name, session_name, pos_name, electrode, unit, BIN
     total_spike_count = len(spike_time)
 
     # mobility only
-    mobility_index = np.argwhere(pos2d.head_speed > 4).ravel() # >4cm/s
-    pos1d_mobility = pos1d.iloc[mobility_index]
-    pos2d_mobility = pos2d.iloc[mobility_index]
+    if immobility:
+        immobility_index = np.argwhere(pos2d.head_speed <= 4).ravel() # >4cm/s
+        pos2d_mobility = pos2d.iloc[immobility_index] #mobility for now, used to calculate map
 
-    pos2d_spike_time_all = interpolate_to_new_time(pos2d,spike_time,
-                                                   upsampling_interpolation_method = 'nearest')
-    mobility_index = np.argwhere(pos2d_spike_time_all.head_speed > 4).ravel() # >4cm/s
-    pos2d_spike_time = pos2d_spike_time_all.iloc[mobility_index]
+        pos2d_spike_time_all = interpolate_to_new_time(pos2d,spike_time,
+                                                       upsampling_interpolation_method = 'nearest')
+        immobility_index = np.argwhere(pos2d_spike_time_all.head_speed <= 4).ravel() # >4cm/s
+        pos2d_spike_time = pos2d_spike_time_all.iloc[immobility_index]
+        
+    else:
+        mobility_index = np.argwhere(pos2d.head_speed > 4).ravel() # >4cm/s
+        pos1d_mobility = pos1d.iloc[mobility_index]
+        pos2d_mobility = pos2d.iloc[mobility_index]
+
+        pos2d_spike_time_all = interpolate_to_new_time(pos2d,spike_time,
+                                                    upsampling_interpolation_method = 'nearest')
+        mobility_index = np.argwhere(pos2d_spike_time_all.head_speed > 4).ravel() # >4cm/s
+        pos2d_spike_time = pos2d_spike_time_all.iloc[mobility_index]
 
     #Define bins for all position
     xmin = np.min(pos2d_mobility.head_position_x)-10
@@ -113,6 +126,10 @@ def place_field(nwb_copy_file_name, session_name, pos_name, electrode, unit, BIN
     ymax = np.max(pos2d_mobility.head_position_y)+10
     xbins = np.arange(xmin,xmax,BINWIDTH)
     ybins = np.arange(ymin,ymax,BINWIDTH)
+    
+    if immobility:
+        immobility_index = np.argwhere(pos2d.head_speed <= 6).ravel() # >4cm/s
+        pos2d_mobility = pos2d.iloc[immobility_index]
 
     # place field, aka occupancy normalized firing rate, aka P(spike | location)
     occupancy, xe, ye = np.histogram2d(pos2d_mobility.head_position_y,
@@ -126,8 +143,10 @@ def place_field(nwb_copy_file_name, session_name, pos_name, electrode, unit, BIN
     spike, xe, ye = np.histogram2d(pos2d_spike_time.head_position_y,
                                    pos2d_spike_time.head_position_x, bins = [ybins,xbins])
 
-
-    pf = spike/occupancy
+    if normalize:
+        pf = spike/occupancy
+    else:
+        pf = spike
     pf = np.nan_to_num(pf, nan = 0, posinf = 0)
     smoothed_placefield = gaussian_filter(pf, sigma = sigma) #1 bin = 1cm
     smoothed_placefield[old_nan_index] = np.nan

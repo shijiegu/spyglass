@@ -103,6 +103,7 @@ class TrialChoice(dj.Manual):
 
         self.insert1(key,replace=replace)
 
+
 @schema
 class TetrodeNumber(dj.Manual):
     definition = """
@@ -112,6 +113,16 @@ class TetrodeNumber(dj.Manual):
     epoch_name: varchar(200)  # session name, get from IntervalList
     ca1_tetrode_ind = NULL: blob  # 0-based indices of CA1 tetrodes channels. These can be used for plotting
     cc_tetrode_ind = NULL: blob  # 0-based indices of Corpus Collosum tetrodes channels. These can be used for plotting
+    """
+
+@schema
+class ChannelNumber(dj.Manual):
+    definition = """
+    # tetrode CHANNEL number for various use
+    -> TaskEpoch
+    ---
+    epoch_name: varchar(200)  # session name, get from IntervalList
+    ripple_channel_ind = NULL: blob  # 0-based indices of CA1 tetrodes channels used for detecting ripples. These should be channels in/above very close to the cell layer.
     """
 
 @schema
@@ -193,6 +204,16 @@ def get_trial_tags(log):
     return log_df_tagged
 
 @schema
+class LFPBandArtifact(dj.Manual):
+    definition = """
+    # artifact removed LFPBand
+    -> LFPBand
+    artifact_params_name : varchar(64) # a name for this set of encoding
+    ---
+    analysis_nwb_file_name : varchar(64)   # name of the file
+    """
+
+@schema
 class ExtendedRippleTimes(dj.Manual):
     definition = """
     # ripple times
@@ -216,6 +237,19 @@ class DecodeIngredients(dj.Manual):
     definition = """
     # ingredients to do decoded replay content
     -> IntervalList
+    ---
+    marks = NULL: blob   # valid marks within that interval
+    position_1d = NULL: blob   # valid position within that interval (1D), inluding all rat-on-track time
+    position_2d = NULL: blob   # valid position within that interval (2D), inluding all rat-on-track time
+    """
+
+@schema
+class DecodeIngredientsLikelihood(dj.Manual):
+    definition = """
+    # ingredients to do likelihood decoded replay content. Larger window size
+    -> IntervalList
+    window_size: double  # in seconds, time window in which you lump neural data for decoding
+    overlap_size: double # in seconds, time window in which you overlap for decoding
     ---
     marks = NULL: blob   # valid marks within that interval
     position_1d = NULL: blob   # valid position within that interval (1D), inluding all rat-on-track time
@@ -368,6 +402,19 @@ class TrialChoiceReplayTransition(dj.Manual):
         # key['epoch_name']=epoch_name
 
         self.insert1(key,replace=replace)
+        
+@schema
+class TrialChoiceChangeofMind(dj.Manual):
+    definition = """
+    # trial by trial information of choice NOTE: ripple based
+    -> TrialChoice
+    proportion: varchar(20)           # minimal amount of proportion the animal is in before it backed out
+    ---
+    change_of_mind_info = NULL: blob  # pandas dataframe, choice, reward, ripple time, replays
+    """
+    def make(self,key,replace=False):
+
+        self.insert1(key,replace=replace)
 
 @schema
 class RippleTimes(dj.Manual):
@@ -438,8 +485,13 @@ def get_linearization_map(track_graph_name='4 arm lumped'):
 def segment_to_linear_range(linear_map,segment_id):
     """takes an int segment_id and return the range of linearization of the 4-arm track """
     #linear_map, welllocations = get_linearization_map()
-    arm = int(segment_id-5)
-    ind = int(2*(arm) + 1)
+    if segment_id == 0:
+        arm = 0
+        ind = 0
+    else:
+        arm = int(segment_id-5)
+        ind = int(2*(arm) + 1)
+    
     return linear_map[ind], arm
 
 def mua_thresholder(ripple_H_,mua,mua_time,mua_threshold):

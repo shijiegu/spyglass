@@ -1,8 +1,12 @@
+from spyglass.common.common_position import IntervalPositionInfo
 from spyglass.shijiegu.load import load_run_sessions
 from spyglass.shijiegu.Analysis_SGU import RippleTimesWithDecode, TrialChoice
+from spyglass.shijiegu.ripple_detection import removeDataBeforeTrial1
 import pandas as pd
+import numpy as np
 
-def cont_vs_frag_occurrence_day(animal,dates_to_plot,encoding_set,classifier_param_name):
+def cont_vs_frag_occurrence_day(animal,dates_to_plot,
+                                encoding_set,classifier_param_name,decode_threshold_method):
     (num_all,num_cont_all,
      num_frag_all,pct_cont_all,
      pct_frag_all,time_cont_all,time_frag_all) = ({},{},{},{},{},{},{})
@@ -18,18 +22,41 @@ def cont_vs_frag_occurrence_day(animal,dates_to_plot,encoding_set,classifier_par
 
         for ind in range(len(run_session_names)):
             session_name = run_session_names[ind]
+            position_name = pos_session_names[ind]
             StateScript = pd.DataFrame(
                 (TrialChoice & {'nwb_file_name':nwb_copy_file_name,'epoch_name':session_name}).fetch1('choice_reward'))
+            
+            if len(StateScript) < 30:
+                continue
+            
+            position_df = (IntervalPositionInfo &
+                {'nwb_file_name': nwb_copy_file_name,
+                'interval_list_name': position_name,
+                'position_info_param_name': 'default'}
+                    ).fetch1_dataframe()
 
             trial_1_t = StateScript.loc[1].timestamp_O
             trial_last_t = StateScript.loc[len(StateScript)-1].timestamp_O
-            session_duration = trial_last_t - trial_1_t
+            position_df = removeDataBeforeTrial1(position_df,trial_1_t,trial_last_t)
+            second_per_frame = np.mean(np.diff(position_df.index)) * 2
+            position_df_ = position_df[position_df.head_speed <= 4]
+            diff = np.diff(position_df_.index)
+            session_duration = np.sum(diff[diff <= second_per_frame])
+
+            print("immobile time is ",str(session_duration),'seconds.')
+
+            #session_duration = trial_last_t - trial_1_t
 
             key = {'nwb_file_name': nwb_copy_file_name,
                    'interval_list_name': session_name,
                    'classifier_param_name': classifier_param_name,
-                   'encoding_set': encoding_set}
-            ripple_times = pd.DataFrame((RippleTimesWithDecode & key
+                   'encoding_set': encoding_set,
+                   'decode_threshold_method':decode_threshold_method}
+            try:
+                ripple_times = pd.DataFrame((RippleTimesWithDecode & key
+                             ).fetch1('ripple_times'))
+            except:
+                ripple_times = pd.read_pickle((RippleTimesWithDecode & key
                              ).fetch1('ripple_times'))
             (num_cont,num_frag,
              pct_cont,pct_frag,

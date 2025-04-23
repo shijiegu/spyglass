@@ -4,22 +4,15 @@ import pandas as pd
 import xarray as xr
 import matplotlib.pyplot as plt
 import pynwb
+from scipy import stats
 import scipy.signal
 #import ghostipy as gsp
 
 
-from spyglass.common import (IntervalPositionInfo, IntervalPositionInfoSelection, IntervalList,
-                             ElectrodeGroup, LFP, interval_list_intersect, LFPBand, Electrode)
+from spyglass.common import (AnalysisNwbfile, IntervalList,interval_list_intersect, LFPBand, LFP, Electrode)
 
-from spyglass.spikesorting.v0 import (SortGroup,
-                                    SortInterval,
-                                    SpikeSortingPreprocessingParameters,
-                                    SpikeSortingRecording,
-                                    SpikeSorterParameters,
-                                    SpikeSortingRecordingSelection,
-                                    ArtifactDetectionParameters, ArtifactDetectionSelection,
-                                    ArtifactRemovedIntervalList, ArtifactDetection,
-                                      SpikeSortingSelection, SpikeSorting,)
+from spyglass.spikesorting.v0 import (SpikeSortingRecordingSelection,
+                                      ArtifactRemovedIntervalList)
 
 from ripple_detection.core import (gaussian_smooth,
                                    get_envelope,
@@ -37,18 +30,22 @@ from scipy.stats import zscore
 from spyglass.utils.nwb_helper_fn import get_nwb_copy_filename
 #from spyglass.shijiegu.load import load_position circular import problem, called directly by full name in code
 from spyglass.shijiegu.helpers import interval_union
-from spyglass.shijiegu.Analysis_SGU import TrialChoice,EpochPos,RippleTimes,HSETimes,MUA
+from spyglass.shijiegu.Analysis_SGU import TrialChoice,EpochPos,RippleTimes,LFPBandArtifact,ChannelNumber
 from spyglass.shijiegu.helpers import interval_union,interpolate_to_new_time
+from spyglass.common.common_position import IntervalPositionInfo
 
 MIN_RIPPLE_LENGTH_IN_S = 0.02
 
-def ripple_detection_master(nwb_file_name, epochID, conservative = True):
+def ripple_detection_master(nwb_file_name, epochID, speed_threshold = 4, conservative = True):
     nwb_copy_file_name=get_nwb_copy_filename(nwb_file_name)
 
     # find epoch/session name and position interval name
     key = (EpochPos & {'nwb_file_name':nwb_copy_file_name,'epoch':epochID}).fetch1()
     epoch_name = key['epoch_name']
     position_interval = key['position_interval']
+    is_run_session = False
+    if epoch_name.split('_')[1][4:8] == 'Sess':
+        is_run_session = True
 
     position_valid_times = (IntervalList & {'nwb_file_name': nwb_copy_file_name,
                                             'interval_list_name': position_interval}).fetch1('valid_times')
@@ -57,23 +54,39 @@ def ripple_detection_master(nwb_file_name, epochID, conservative = True):
     filtered_lfps, filtered_lfps_t, CA1TetrodeInd, CCTetrodeInd = loadRippleLFP_OneChannelPerElectrode(
         nwb_copy_file_name,epoch_name,position_valid_times)
 
-    # Remove Data before 1st trial and after last trial
-    StateScript = pd.DataFrame(
-        (TrialChoice & {'nwb_file_name':nwb_copy_file_name,'epoch':int(epoch_name[:2])}).fetch1('choice_reward')
-    )
+    electrodes = get_electrodes_table(nwb_copy_file_name, epoch_name)
 
-    trial_1_t = StateScript.loc[1].timestamp_O
-    trial_last_t = StateScript.loc[len(StateScript)-1].timestamp_O
+    # use only those channels that are in the cell layer (or above but very close) for maximal ripple
+    ripple_channels_table = ChannelNumber & {'nwb_file_name': nwb_copy_file_name,'epoch_name': epoch_name}
+    if len(ripple_channels_table) > 0:
+        ripple_channels = ripple_channels_table.fetch1("ripple_channel_ind")
+        ripple_channel_ind = np.isin(electrodes.index[CA1TetrodeInd],ripple_channels)
+        filtered_lfps = filtered_lfps[:, ripple_channel_ind]
 
-    t_ind = np.logical_and(filtered_lfps_t >= trial_1_t, filtered_lfps_t <= trial_last_t)
-    filtered_lfps_t = filtered_lfps_t[t_ind]
-    filtered_lfps = filtered_lfps[t_ind,:]
+    if is_run_session:
+        # Remove Data before 1st trial and after last trial
+        StateScript = pd.DataFrame(
+            (TrialChoice & {'nwb_file_name':nwb_copy_file_name,'epoch':int(epoch_name[:2])}).fetch1('choice_reward')
+        )
+
+        trial_1_t = StateScript.loc[1].timestamp_O
+        trial_last_t = StateScript.loc[len(StateScript)-1].timestamp_O
+
+        t_ind = np.logical_and(filtered_lfps_t >= trial_1_t, filtered_lfps_t <= trial_last_t)
+        filtered_lfps_t = filtered_lfps_t[t_ind]
+        filtered_lfps = filtered_lfps[t_ind,:]
 
     # load Position
-    position_info = spyglass.shijiegu.load.load_position(nwb_copy_file_name,position_interval)
+    position_info = load_position(nwb_copy_file_name,position_interval)
     position_info_upsample = interpolate_to_new_time(position_info, filtered_lfps_t)
-    position_info_upsample = removeDataBeforeTrial1(position_info_upsample,trial_1_t,trial_last_t)
     position_info_upsample = removeArtifactTime(position_info_upsample, filtered_lfps)
+    if is_run_session:
+        position_info_upsample = removeDataBeforeTrial1(position_info_upsample,trial_1_t,trial_last_t,drop=False)
+    """test"""
+    #SMALLEST = np.iinfo(filtered_lfps.dtype).min + 1
+    #drop_ind = (filtered_lfps <= SMALLEST)[:,0]
+    #filtered_lfps [drop_ind] = np.nan
+
 
     """Detecting Ripples"""
     lfp_band_sampling_rate=(LFPBand & {'nwb_file_name':nwb_copy_file_name,
@@ -121,7 +134,7 @@ def ripple_detection_master(nwb_file_name, epochID, conservative = True):
     ripple_times = Gu_ripple_detector(
         filtered_lfps_t, filtered_lfps,
         np.array(position_info_upsample.head_speed), lfp_band_sampling_rate,
-        speed_threshold=4.0, zscore_threshold=2.0, conservative = conservative)
+        speed_threshold = speed_threshold, zscore_threshold=2.0, conservative = conservative)
 
     return ripple_times, CA1TetrodeInd, CCTetrodeInd
 
@@ -132,6 +145,9 @@ def extended_ripple_detection_master(nwb_file_name,epochID):
     key = (EpochPos & {'nwb_file_name':nwb_copy_file_name,'epoch':epochID}).fetch1()
     epoch_name = key['epoch_name']
     position_interval = key['position_interval']
+    is_run_session = False
+    if epoch_name.split('_')[1][4:8] == 'Sess':
+        is_run_session = True
 
     position_valid_times = (IntervalList & {'nwb_file_name': nwb_copy_file_name,
                                             'interval_list_name': position_interval}).fetch1('valid_times')
@@ -140,37 +156,89 @@ def extended_ripple_detection_master(nwb_file_name,epochID):
     filtered_lfps, filtered_lfps_t, CA1TetrodeInd, CCTetrodeInd = loadRippleLFP_OneChannelPerElectrode(
         nwb_copy_file_name,epoch_name,position_valid_times)
 
+    electrodes = get_electrodes_table(nwb_copy_file_name, epoch_name)
 
-    # Remove Data before 1st trial and after last trial
-    StateScript = pd.DataFrame(
-        (TrialChoice & {'nwb_file_name':nwb_copy_file_name,'epoch':int(epoch_name[:2])}).fetch1('choice_reward')
-    )
-    trial_1_t = StateScript.loc[1].timestamp_O
-    trial_last_t = StateScript.loc[len(StateScript)-1].timestamp_O
+    # use only those channels that are in the cell layer (or above but very close) for maximal ripple
+    ripple_channels_table = ChannelNumber & {'nwb_file_name': nwb_copy_file_name,'epoch_name': epoch_name}
+    if len(ripple_channels_table) > 0:
+        ripple_channels = ripple_channels_table.fetch1("ripple_channel_ind")
+        ripple_channel_ind = np.isin(electrodes.index[CA1TetrodeInd],ripple_channels)
+        filtered_lfps = filtered_lfps[:, ripple_channel_ind]
 
-    t_ind = np.logical_and(filtered_lfps_t >= trial_1_t, filtered_lfps_t <= trial_last_t)
-    filtered_lfps_t = filtered_lfps_t[t_ind]
-    filtered_lfps = filtered_lfps[t_ind,:]
+    if is_run_session:
+        # Remove Data before 1st trial and after last trial
+        StateScript = pd.DataFrame(
+            (TrialChoice & {'nwb_file_name':nwb_copy_file_name,'epoch':int(epoch_name[:2])}).fetch1('choice_reward')
+        )
+        trial_1_t = StateScript.loc[1].timestamp_O
+        trial_last_t = StateScript.loc[len(StateScript)-1].timestamp_O
+
+        t_ind = np.logical_and(filtered_lfps_t >= trial_1_t, filtered_lfps_t <= trial_last_t)
+        filtered_lfps_t = filtered_lfps_t[t_ind]
+        filtered_lfps = filtered_lfps[t_ind,:]
 
     # load Position
-    position_info = spyglass.shijiegu.load.load_position(nwb_copy_file_name,position_interval)
+    position_info = load_position(nwb_copy_file_name,position_interval)
     position_info_upsample = interpolate_to_new_time(position_info, filtered_lfps_t)
-    position_info_upsample = removeDataBeforeTrial1(position_info_upsample,trial_1_t,trial_last_t)
     position_info_upsample = removeArtifactTime(position_info_upsample, filtered_lfps)
+    if is_run_session:
+        position_info_upsample = removeDataBeforeTrial1(position_info_upsample,trial_1_t,trial_last_t,drop=False)
 
     """Extend Ripples"""
     lfp_band_sampling_rate=(LFPBand & {'nwb_file_name':nwb_copy_file_name,
                                     'target_interval_list_name': epoch_name,
                                     'filter_name': 'Ripple 150-250 Hz'}).fetch1('lfp_band_sampling_rate')
-
-    ripple_times = pd.DataFrame((RippleTimes() & {'nwb_file_name': nwb_copy_file_name,
-                                              'interval_list_name': epoch_name}).fetch1('ripple_times'))
+    ripple_times_query = (RippleTimes() & {'nwb_file_name': nwb_copy_file_name,
+                                              'interval_list_name': epoch_name}).fetch1('ripple_times')
+    if type(ripple_times_query) is dict:
+        ripple_times = pd.DataFrame(ripple_times_query)
+    else:
+        ripple_times = pd.read_csv(ripple_times_query)
 
     ripple_times = extended_ripple_detector(ripple_times,
         filtered_lfps_t, filtered_lfps,
         np.array(position_info_upsample.head_speed), lfp_band_sampling_rate, speed_threshold=4.0, zscore_threshold=2.0)
 
     return ripple_times, CA1TetrodeInd, CCTetrodeInd
+
+def get_electrodes_table(nwb_copy_file_name,epoch_name):
+    fieldname = "filtered data"
+    animal_name = nwb_copy_file_name[:5]
+    key = {'nwb_file_name': nwb_copy_file_name,
+            'target_interval_list_name': epoch_name,
+            'filter_name': 'Ripple 150-250 Hz'}
+    ripple_nwb_file_name = (LFPBand & key).fetch1('analysis_file_name')
+
+    analysisNWBFilePath = AnalysisNwbfile.get_abs_path(ripple_nwb_file_name)
+
+    with pynwb.NWBHDF5IO(analysisNWBFilePath, 'r',load_namespaces=True) as io:
+        ripple_nwb = io.read()
+        electrodes=ripple_nwb.scratch[fieldname].electrodes.to_dataframe()
+
+    return electrodes
+
+def load_position(nwb_copy_file_name,interval_list_name):
+    position_info_param_name = 'default'
+    position_valid_times = (IntervalList & {'nwb_file_name': nwb_copy_file_name,
+                                        'interval_list_name':interval_list_name}).fetch1('valid_times')
+
+    position_info = (IntervalPositionInfo() & {'nwb_file_name': nwb_copy_file_name,
+                'interval_list_name': interval_list_name,
+                'position_info_param_name': position_info_param_name}).fetch1_dataframe()
+    position_info = pd.concat(
+        [position_info.loc[slice(valid_time[0], valid_time[1])]
+         for valid_time in position_valid_times], axis=0)
+    return position_info
+
+def load_LFP(nwb_copy_file_name,epoch_name):
+    # broad band LFP
+    # TO DO. USE ARTIFACT REMOVED
+    lfp_nwb=(LFP & {'nwb_file_name': nwb_copy_file_name,
+            'target_interval_list_name':epoch_name}).fetch_nwb()
+
+    lfp_data=lfp_nwb[0]['lfp'].data
+    lfp_timestamps=np.array(lfp_nwb[0]['lfp'].timestamps)
+    return lfp_data,lfp_timestamps
 
 def loadRippleLFP(nwb_copy_file_name,
             interval_list_name,
@@ -179,13 +247,16 @@ def loadRippleLFP(nwb_copy_file_name,
     """fieldname is either 'filtered data' for first time runnning through LFP not yet artifact removed.
                     or 'artifact removed filtered data'.
     """
-    ripple_nwb_file_path = (LFPBand & {'nwb_file_name': nwb_copy_file_name,
-                                    'target_interval_list_name': interval_list_name,
-                                    'filter_name': 'Ripple 150-250 Hz'}).fetch1('analysis_file_name')
-    if nwb_copy_file_name[:5] == "molly":
-        analysisNWBFilePath = '/stelmo/nwb/analysis/'+ripple_nwb_file_path
+    animal_name = nwb_copy_file_name[:5]
+    key = {'nwb_file_name': nwb_copy_file_name,
+           'target_interval_list_name': interval_list_name,
+           'filter_name': 'Ripple 150-250 Hz'}
+    if fieldname == "filtered data" or (animal_name == "eliot"):
+        ripple_nwb_file_name = (LFPBand & key).fetch1('analysis_file_name')
     else:
-        analysisNWBFilePath = '/stelmo/nwb/analysis/'+nwb_copy_file_name[:-5]+'/'+ripple_nwb_file_path
+        ripple_nwb_file_name = (LFPBandArtifact & key).fetch1('analysis_nwb_file_name')
+    analysisNWBFilePath = AnalysisNwbfile.get_abs_path(ripple_nwb_file_name)
+
     with pynwb.NWBHDF5IO(analysisNWBFilePath, 'r',load_namespaces=True) as io:
         ripple_nwb = io.read()
 
@@ -206,7 +277,8 @@ def loadRippleLFP(nwb_copy_file_name,
             ripple_lfp = np.array(ripple_nwb.scratch[fieldname].data)
             ripple_lfp_t = filtered_t
 
-    return ripple_lfp, ripple_lfp_t, electrodes
+    notnan_ind = ~np.isnan(ripple_lfp_t)
+    return ripple_lfp[notnan_ind], ripple_lfp_t[notnan_ind], electrodes
 
 def loadRippleLFP_OneChannelPerElectrode(nwb_copy_file_name,
             interval_list_name,
@@ -230,7 +302,7 @@ def loadRippleLFP_OneChannelPerElectrode(nwb_copy_file_name,
     ripple_data, ripple_timestamps, electrodes = loadRippleLFP(nwb_copy_file_name,interval_list_name,
                                                          position_valid_times,
                                                          fieldname)
-    electrodes.index = np.arange(len(electrodes))
+
 
     ## find tetrodes with signal
     groups_with_cell=(SpikeSortingRecordingSelection & {
@@ -241,9 +313,21 @@ def loadRippleLFP_OneChannelPerElectrode(nwb_copy_file_name,
     print("\n")
 
     ## only choose one channel
-    CA1TetrodeInd = []
-    for e in groups_with_cell:
-        CA1TetrodeInd.append(electrodes[electrodes['group_name']==str(e)].index[0])
+    # if there is designed list of ripple channels
+    query = (ChannelNumber() & {'nwb_file_name': nwb_copy_file_name,
+                    'epoch_name': interval_list_name})
+    if len(query) > 0:
+        ripple_channel_ind = query.fetch1("ripple_channel_ind")
+        subset_ind = np.isin(np.array(electrodes.index), ripple_channel_ind)
+        CA1TetrodeInd = np.arange(len(electrodes))[subset_ind]
+        electrodes.index = np.arange(len(electrodes))
+    else:
+        electrodes.index = np.arange(len(electrodes))
+        CA1TetrodeInd = []
+        for e in groups_with_cell:
+            CA1TetrodeInd.append(electrodes[np.logical_and(electrodes['group_name']==str(e),
+                                                           electrodes['bad_channel'] == False)
+                                            ].index[0])
 
     ## get reference electrode index
     CCTetrodeInd = []
@@ -267,11 +351,12 @@ def loadRippleLFP_OneChannelPerElectrode(nwb_copy_file_name,
     else:
         return filtered_lfps[:,CA1TetrodeInd], time, CA1TetrodeInd, CCTetrodeInd
 
-def removeDataBeforeTrial1(position_df,trial_1_time,trial_last_time):
+def removeDataBeforeTrial1(position_df,trial_1_time,trial_last_time,drop = True):
     problem_ind = position_df.index[np.logical_or(position_df.index <= trial_1_time,
                                                   position_df.index >= trial_last_time)]
     position_df.loc[problem_ind] = np.nan
-    position_df = position_df.drop(problem_ind)
+    if drop:
+        position_df = position_df.drop(problem_ind)
     return position_df
 
 def removeArrayDataBeforeTrial1(data,data_t,trial_1_time,trial_last_time):
@@ -704,10 +789,10 @@ def get_event_stats(event_times, time, zscore_metric, speed):
         max_zscore.append(np.max(event_zscore))
         min_zscore.append(np.min(event_zscore))
         duration.append(end_time - start_time)
-        max_speed.append(np.max(speed[ind]))
-        min_speed.append(np.min(speed[ind]))
-        median_speed.append(np.median(speed[ind]))
-        mean_speed.append(np.mean(speed[ind]))
+        max_speed.append(np.nanmax(speed[ind]))
+        min_speed.append(np.nanmin(speed[ind]))
+        median_speed.append(np.nanmedian(speed[ind]))
+        mean_speed.append(np.nanmean(speed[ind]))
 
     try:
         event_start_times = event_times[:, 0]
@@ -761,12 +846,13 @@ def extended_ripple_detector(ripple_times, time, filtered_lfps, speed, sampling_
                         zscore_threshold, smoothing_sigma,
                         close_ripple_threshold)
     start_end = np.vstack((np.array(ripple_times.start_time)-0.1,
-                                np.array(ripple_times.end_time)+0.1))
+                                np.array(ripple_times.end_time)+0.1)) # 2 x len(ripple_times)
     start_end_list = [[start_end[0,ci],start_end[1,ci]] for ci in range(start_end.shape[1])]
     extended_start_end = np.array(list(merge_overlapping_ranges(start_end_list)))
 
-    is_low_speed = pd.Series(speed <= speed_threshold, index=time)
-    extended_start_end = interval_list_intersect(extended_start_end, np.array(segment_boolean_series(is_low_speed)))
+    #will do the following inside trial by trial parsing ripple_add_replay.py
+    #is_low_speed = pd.Series(speed <= speed_threshold, index=time)
+    #extended_start_end = interval_list_intersect(extended_start_end, np.array(segment_boolean_series(is_low_speed)))
 
     #extended_start_end_df = pd.DataFrame(
     #    {
@@ -798,7 +884,7 @@ def Gu_ripple_detector(time, filtered_lfps, speed, sampling_frequency,
     if conservative:
         print("both Karlsson and Consensus method")
         RippleTimes_Karlsson = Karlsson_ripple_detector(
-            time, filtered_lfps, speed, sampling_frequency, numberOfChannel=2,
+            time, filtered_lfps, speed, sampling_frequency, numberOfChannel=2,#2 for Eliot
             speed_threshold=speed_threshold,
             minimum_duration=minimum_duration,
             zscore_threshold=3,#zscore_threshold,
@@ -891,14 +977,40 @@ def Gu_ripple_detector(time, filtered_lfps, speed, sampling_frequency,
 
 
 def removeArtifactInFilteredData(nwb_copy_file_name, session_interval_name,
-                    filter_name = 'Ripple 150-250 Hz', interp = False):
-    ripple_nwb_file_path = (LFPBand & {'nwb_file_name': nwb_copy_file_name,
+                    filter_name = 'Ripple 150-250 Hz', interp = False,
+                    artifact_params_name = 'ampl_100_prop_05_2ms',broadband_zscore = 3):
+    
+    ripple_nwb_file_name = (LFPBand & {'nwb_file_name': nwb_copy_file_name,
                                    'target_interval_list_name': session_interval_name,
                                    'filter_name': filter_name}).fetch1('analysis_file_name')
-    if nwb_copy_file_name[:5] == "molly":
-        analysisNWBFilePath = '/stelmo/nwb/analysis/'+ripple_nwb_file_path
+    ripple_nwb_file_copy_name = AnalysisNwbfile.copy(ripple_nwb_file_name)
+
+    analysisNWBFilePath = AnalysisNwbfile.get_abs_path(ripple_nwb_file_copy_name)
+
+    """Get broad band LFP and channels"""
+    key = (EpochPos & {'nwb_file_name': nwb_copy_file_name,'epoch_name': session_interval_name}).fetch1()
+    position_valid_times = (IntervalList & {'nwb_file_name': nwb_copy_file_name,
+                                            'interval_list_name': key['position_interval']}
+                            ).fetch1('valid_times')
+    _, _2, CA1TetrodeInd, _3 = loadRippleLFP_OneChannelPerElectrode(
+        nwb_copy_file_name, session_interval_name, position_valid_times,"filtered data")
+
+    lfp,lfp_t = load_LFP(nwb_copy_file_name, session_interval_name)
+    lfp_df = pd.DataFrame(data=lfp[:,CA1TetrodeInd], index=lfp_t)
+    lfp_np = np.array(lfp_df)
+    lfp_t = lfp_df.index
+
+    # broadband LFP (from head banging the well/wall etc)artifact time:
+    if broadband_zscore > 0:
+        lfp_normalized = lfp_np.copy()
+        lfp_normalized = stats.zscore(lfp_normalized, axis=0)
+        artifact_broadLFP_bool = np.sum(lfp_normalized <= -broadband_zscore,axis=1)/np.shape(lfp_normalized)[1] > 0.8
+        artifact_broadLFP_bool_pd = pd.Series(artifact_broadLFP_bool, index=lfp_t)
+        artifact_broadLFP_segments = np.array(segment_boolean_series(
+            artifact_broadLFP_bool_pd, minimum_duration=0))
     else:
-        analysisNWBFilePath = '/stelmo/nwb/analysis/'+nwb_copy_file_name[:-5]+'/'+ripple_nwb_file_path
+        artifact_broadLFP_segments = []
+
 
     with pynwb.NWBHDF5IO(analysisNWBFilePath, 'r+',load_namespaces=True) as io:
         ripple_nwb = io.read()
@@ -908,20 +1020,35 @@ def removeArtifactInFilteredData(nwb_copy_file_name, session_interval_name,
         SMALLEST = np.iinfo(filtered_data.dtype).min #-32768, or -32767
 
         '''artifact time to nan'''
-        artifact_times_100=(ArtifactRemovedIntervalList()
-                                & {'nwb_file_name': nwb_copy_file_name,
-                                    'sort_interval_name':session_interval_name,
-                                    'sort_group_id':100}).fetch1('artifact_times')
-        artifact_times_101=(ArtifactRemovedIntervalList()
-                                & {'nwb_file_name': nwb_copy_file_name,
-                                    'sort_interval_name':session_interval_name,
-                                    'sort_group_id':101}).fetch1('artifact_times')
+        right_side_key = {'nwb_file_name': nwb_copy_file_name,
+                          'artifact_params_name':artifact_params_name,
+                          'sort_interval_name':session_interval_name,
+                          'sort_group_id':100}
+        artifact_times_100 = np.array([])
+        if len(ArtifactRemovedIntervalList() & right_side_key) > 0:
+            artifact_times_100=(ArtifactRemovedIntervalList()
+                                & right_side_key).fetch1('artifact_times')
+            artifact_times_100 = np.reshape(artifact_times_100,(-1,2))
+            
+        left_side_key = {'nwb_file_name': nwb_copy_file_name,
+                         'artifact_params_name':artifact_params_name,
+                         'sort_interval_name':session_interval_name,
+                         'sort_group_id':101}
+        artifact_times_101 = np.array([])
+        if len(ArtifactRemovedIntervalList() & left_side_key) > 0:
+            artifact_times_101=(ArtifactRemovedIntervalList()
+                                & left_side_key).fetch1('artifact_times')
+            artifact_times_101 = np.reshape(artifact_times_101,(-1,2))
 
         artifact_time_list=interval_union(artifact_times_100,artifact_times_101)
 
         for artifact_time in artifact_time_list:
             filtered_data[np.logical_and(timestamps>=artifact_time[0],
                         timestamps<=artifact_time[1]),:] = SMALLEST #the smallest number in int16
+        
+        for artifact_time in artifact_broadLFP_segments:
+            filtered_data[np.logical_and(timestamps>=artifact_time[0]-0.01,
+                        timestamps<=artifact_time[1]+0.01),:] = SMALLEST #the smallest number in int16
 
         if interp:
             nan_ind=(filtered_data[:,1] == SMALLEST).ravel()
@@ -939,6 +1066,20 @@ def removeArtifactInFilteredData(nwb_copy_file_name, session_interval_name,
         ripple_nwb.add_scratch(es)
 
         io.write(ripple_nwb)
+
+    # insert into LFPBandArtifact
+    if broadband_zscore > 0:
+        artifact_params_name = artifact_params_name + f'broadlfp_neg{broadband_zscore}d_prop_08_20ms'
+    key = (LFPBand & {'nwb_file_name': nwb_copy_file_name,
+                      'target_interval_list_name': session_interval_name,
+                      'filter_name': filter_name}).fetch1()
+    key.pop('analysis_file_name')
+    key.pop('interval_list_name')
+    key.pop('filtered_data_object_id')
+    key['artifact_params_name'] = artifact_params_name
+    key['analysis_nwb_file_name'] = ripple_nwb_file_copy_name
+
+    LFPBandArtifact.insert1(key,replace = True)
 
 def multiunit_HSE_detector(
     time,

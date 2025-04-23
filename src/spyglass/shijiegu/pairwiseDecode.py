@@ -10,6 +10,8 @@ from spyglass.shijiegu.decodeHelpers import runSessionNames
 from spyglass.shijiegu.Analysis_SGU import TrialChoice,TrialChoiceReplayTransition
 
 from spyglass.utils.nwb_helper_fn import get_nwb_copy_filename
+from spyglass.shijiegu.ripple_add_replay import find_start_end
+from spyglass.shijiegu.load import load_LFP,load_position,load_decode
 
 def merge_overlapping_ranges(ranges):
     '''
@@ -61,6 +63,45 @@ def removeEmptyDecode(arms):
         arms_.append(arms_a)
     return arms_,ind_
 
+def removeHomeDecode(arms):
+    # within each ripple event, there can be periods where there is no decode due to ambiguity
+    # also concatenated arms
+    """
+    Example:
+    input: [[[4], [0], [0,3]], [[4], [0], [0]], [[], [], [], [0]], [[4], []], [[0], [3]]]
+    output: arms_ = [[[4], [3]], [[4]], [], [[4]], [[3]]]
+            ind_ = [[0, 2], [0], [], [0], [1]]
+    """
+
+    ind_ = []
+    arms_ = []
+    for a in arms:
+        i = 0
+        arms_a = []
+        ind_a = []
+        for ai in a:
+            ai = np.array(ai)
+            arm_ind = ~np.isin(ai,[0,5])
+            ai = list(ai[arm_ind])
+            if len(ai) > 0:
+                ind_a.append(i)
+                arms_a.append(ai)
+            i = i + 1
+        ind_.append(ind_a)
+        arms_.append(arms_a)
+    return arms_,ind_
+
+def duplicate_time(arms, times):
+    # duplicate time interval for those replay intervals with unclear time boundary
+    # ....so that len(arms) == len(times)
+    times_out = []
+    for a_ind in range(len(arms)):
+        times_out_tmp = []
+        for i in range(len(arms[a_ind])):
+            times_out_tmp.append(times[a_ind])
+        times_out.append(np.array(times_out_tmp))
+    return times_out
+
 def findReplayPair(T):
     """
     T is choice_reward_replay table
@@ -71,6 +112,8 @@ def findReplayPair(T):
     transitions_all=np.zeros((6,6))
     T_transition=T.copy()
     T_transition.insert(4,'replayed_transitions',[[] for i in range(len(T))]) #hold replayed transitions
+    T_transition.insert(5,'replayed_transitions_time',[[] for i in range(len(T))]) #hold replayed transitions
+    T_transition.insert(6,'replayed_singletons',[[] for i in range(len(T))]) #hold replayed transitions
 
     for t in T.index:
         arms=T.loc[t,'replay_H'].copy()
@@ -78,8 +121,8 @@ def findReplayPair(T):
 
         if len(arms)==0:
             continue
-        # remove empty entries (ripples that are pure fragmented)
-        replays_ind=[i for i in range(len(arms)) if len(arms[i])>0]
+        # remove empty entries (ripples that are pure fragmented) and are home or middle platform
+        replays_ind=[i for i in range(len(arms)) if (len(arms[i])>0 and (arms[i]!=0 and arms[i]!=5))]
         ripple_times=[ripple_times[i] for i in replays_ind]
         arms=[arms[i] for i in replays_ind]
 
@@ -90,15 +133,25 @@ def findReplayPair(T):
         ripple_times_nonempty = []
         for r_ind in range(len(ripple_times)):
             ripple_times_nonempty.append(ripple_times[r_ind][nonemptyInd[r_ind]])
+        
+        arms, nonHomeInd = removeHomeDecode(arms)
+        ripple_times_nonhome = []
+        for r_ind in range(len(ripple_times_nonempty)):
+            ripple_times_nonhome.append(ripple_times_nonempty[r_ind][nonHomeInd[r_ind]])
 
         #ripple_times = np.concatenate(ripple_times)
         #ripple_times = ripple_times[nonemptyInd,:]
         #arms = np.array(arms)
 
-        for ripple_ind_this_trial in range(len(ripple_times_nonempty)):
-            ripple_times_ = ripple_times_nonempty[ripple_ind_this_trial]
+        for ripple_ind_this_trial in range(len(ripple_times_nonhome)):
+            ripple_times_ = ripple_times_nonhome[ripple_ind_this_trial]
             arms_ = arms[ripple_ind_this_trial]
-
+            if len(arms_) == 0:
+                continue
+            # make sure there is one-to-one mapping between arms and ripple times
+            ripple_times_ = np.concatenate(duplicate_time(arms_, ripple_times_))
+            arms_ = np.concatenate(arms_)
+            
             ripple_times_[:,0]=ripple_times_[:,0]-0.1
             ripple_times_[:,1]=ripple_times_[:,1]+0.1
 
@@ -107,29 +160,52 @@ def findReplayPair(T):
             for bout in ripple_bouts:
 
                 # move all arms between the first and the last segment into one bout
-                arms_bout = np.concatenate([arms_[i] for i in np.arange(int(bout[2]),int(bout[3])+1)])
+                # bout[2] and bout[3] are indices of first and last intervals to be merged
+                indices = np.arange(int(bout[2]),int(bout[3])+1)
+                arms_bout = arms_[indices]
+                #arms_bout = np.concatenate([arms_[i] for i in indices])
 
                 # remove home and center platform
-                arm_ind=~np.isin(arms_bout,[0,5])
-                arms_bout=arms_bout[arm_ind]
+                #arm_ind=~np.isin(arms_bout,[0,5])
+                #arms_bout=arms_bout[arm_ind]
+                #indices = indices[arm_ind]
+                #print("length of arms_bout and indices")
+                #print(len(arms_bout))
+                #print(len(indices))
 
                 # remove nans
                 notnan_ind=~np.isnan(arms_bout)
                 arms_bout=arms_bout[notnan_ind]
+                indices = indices[notnan_ind]
 
                 if len(arms_bout)==0:
                     continue
-                if len(arms_bout)>1:
+                
+                elif len(arms_bout)>=1:
+                    #print(arms_bout)
                     # get rid of adjacent duplicates
-                    arms_bout=np.array(remove_adjacent(list(arms_bout)))
-                    for m in range(len(arms_bout)-1):
-                        i=int(arms_bout[m])
-                        j=int(arms_bout[m+1])
-                        transitions_all[i,j]+=1
-                        if i!=j:
+                    arms_bout, notrepeat_ind=np.array(remove_adjacent(list(arms_bout)))
+                    indices = indices[notrepeat_ind]
+
+                    if len(arms_bout) == 1:
+                        i = int(arms_bout[0])
+                        T_transition.at[t,'replayed_singletons'].append(i)
+                        transitions_all[i,i]+=1
+                    else:
+                        
+                        for m in range(len(arms_bout)-1):
+                            i=int(arms_bout[m])
+                            j=int(arms_bout[m+1])
+                            transitions_all[i,j]+=1
                             T_transition.at[t,'replayed_transitions'].append((i,j))
-                else:
-                    transitions_all[int(arms_bout[0]),int(arms_bout[0])]+=1
+                            
+                            i_ind = int(indices[m])
+                            j_ind = int(indices[m+1])
+                            T_transition.at[t,'replayed_transitions_time'].append(
+                                np.array([[ripple_times_list[i_ind][0]+0.1,ripple_times_list[i_ind][1]-0.1],
+                                 [ripple_times_list[j_ind][0]+0.1,ripple_times_list[j_ind][1]-0.1]]))
+                #else:
+                #    transitions_all[int(arms_bout[0]),int(arms_bout[0])]+=1
 
     transitions_all_ = transitions_all[1:5,:]
     transitions_all_ = transitions_all_[:,1:5]
@@ -158,6 +234,78 @@ def replay_day_transitions(nwb_copy_file_name,encoding_set,classifier_param_name
     count = np.nansum(transitions_all)
     #transitions_all_percentage = transitions_all/count
     return count, (transitions_all, normalize_offdiag_rowwise(transitions_all), normalize_offdiag_colwise(transitions_all))
+
+# replay transitions
+def categorized_replay_transitions_day(nwb_copy_file_name,encoding_set,classifier_param_name = ''):
+    session_interval, position_interval = runSessionNames(nwb_copy_file_name)
+    
+    (transitions_all_frag, transitions_all_cont) = (np.zeros((4,4)), np.zeros((4,4)))
+    
+    for epoch_name in session_interval:
+        print(epoch_name)
+
+        key = {'nwb_file_name': nwb_copy_file_name,
+               'interval_list_name': epoch_name,
+               'classifier_param_name':classifier_param_name,
+               'encoding_set':encoding_set}
+        
+        T_transition = pd.DataFrame((TrialChoiceReplayTransition() & key).fetch1(
+            'choice_reward_replay_transition'))
+        
+        decode = load_decode(nwb_copy_file_name,epoch_name,
+                         classifier_param_name = classifier_param_name,
+                         encoding_set = encoding_set)
+
+        T_fragmented, T_continuous = categorized_replay_transitions_session(T_transition,decode)
+        transitions_all_frag = transitions_all_frag + T_fragmented
+        transitions_all_cont = transitions_all_cont + T_continuous
+
+    np.fill_diagonal(transitions_all_frag,np.nan)
+    np.fill_diagonal(transitions_all_cont,np.nan)
+    count_frag = np.nansum(transitions_all_frag)
+    count_cont = np.nansum(transitions_all_cont)
+    
+    #transitions_all_percentage = transitions_all/count
+    return count_frag, (transitions_all_frag,
+                        normalize_offdiag_rowwise(transitions_all_frag),
+                        normalize_offdiag_colwise(transitions_all_frag)), count_cont, (transitions_all_cont,
+                        normalize_offdiag_rowwise(transitions_all_cont),
+                        normalize_offdiag_colwise(transitions_all_cont))
+    
+def categorized_replay_transitions_session(T_transition,decode):
+    T_fragmented = np.zeros((4,4))
+    T_continuous = np.zeros((4,4))
+    
+    for t in T_transition.index:
+        arms_t = T_transition.loc[t,'replayed_transitions']
+        interval_t = T_transition.loc[t,'replayed_transitions_time']
+        for i in range(len(interval_t)):
+            interval_ti = interval_t[i]
+            arms_ti = arms_t[i]
+            
+            (t0,t1) = (interval_ti[0,1], interval_ti[1,0])
+            state_posterior = decode.sel(time=slice(t0,t1)).causal_posterior.sum('position')
+            time=np.array(state_posterior.time)
+            snippets_frag = find_start_end(state_posterior[:,1]>=0.5)
+            snippets_frag_len =[np.diff(time[s]) for s in snippets_frag]
+            snippets_frag_sum = np.sum(snippets_frag_len)
+            
+            if snippets_frag_sum > 0.02:
+                T_fragmented[arms_ti[0] - 1, arms_ti[1] - 1] += 1
+            elif snippets_frag_sum < 0.01:
+                T_continuous[arms_ti[0] - 1, arms_ti[1] - 1] += 1
+                
+    return T_fragmented, T_continuous
+
+def categorized_replay_transitions(animal,dates_to_plot,encoding_set,classifier_param_name=''):
+    P_replay_all_frag = {}
+    count_all_frag = {}
+    P_replay_all_cont = {}
+    count_all_cont = {}
+    for d in dates_to_plot:
+        nwb_file_name = animal.lower() + d + '_.nwb'
+        count_all_frag[d], P_replay_all_frag[d], count_all_cont[d], P_replay_all_cont[d] = categorized_replay_transitions_day(nwb_file_name,encoding_set,classifier_param_name)
+    return count_all_frag, P_replay_all_frag, count_all_cont, P_replay_all_cont
 
 def replay_transitions(animal,dates_to_plot,encoding_set,classifier_param_name=''):
     P_replay_all = {}
@@ -479,10 +627,9 @@ def findXCorrAllDays(transition_dict):
     return xcorr_replay_plot
 
 # behavior transitions
-def behavior_transitions(animal,dates_to_plot):
+def behavior_transitions(animal,dates_to_plot,datafolder = '/cumulus/shijie/behavior_pilot/Batch1'):
     # load behavior meta data, use dates as key
 
-    datafolder = '/cumulus/shijie/behavior_pilot/Batch1'
     data_pair2=pickle.load(open(os.path.join(datafolder,animal,'behavior_metaPairwise_'+animal+'.p'), "rb"))
 
     dates = data_pair2['dates']

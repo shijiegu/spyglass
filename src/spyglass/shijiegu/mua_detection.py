@@ -48,33 +48,40 @@ def mua_detection_master(nwb_copy_file_name, epochID):
     key = (EpochPos & {'nwb_file_name':nwb_copy_file_name,'epoch':epochID}).fetch1()
     epoch_name = key['epoch_name']
     position_interval = key['position_interval']
+    is_run_session = False
+    if epoch_name.split('_')[1][4:8] == 'Sess':
+        is_run_session = True
 
     # Get MUA
-    _0,_1,mua_time,mua,_2=load_maze_spike(nwb_copy_file_name,epoch_name)
+    if is_run_session:
+        _0,_1,mua_time,mua,_2=load_maze_spike(nwb_copy_file_name,epoch_name)
+    else:
+        _0,_1,mua_time,mua,_2=load_spike(nwb_copy_file_name,epoch_name)
 
     mua_smooth = gaussian_smooth(mua, 0.004, 30000) # 4ms smoothing, as in Kay, Karlsson, spiking data are in 30000Hz
     mua_ds = mua_smooth[::10]
     mua_time_ds = mua_time[::10]
 
-    # Remove Data before 1st trial and after last trial and artifact
     # to remove artifact, we use LFP to help, where artifact times are noted already
-
     position_valid_times = (IntervalList & {'nwb_file_name': nwb_copy_file_name,
                                             'interval_list_name': position_interval}).fetch1('valid_times')
 
     filtered_lfps, filtered_lfps_t, CA1TetrodeInd, CCTetrodeInd = loadRippleLFP_OneChannelPerElectrode(
             nwb_copy_file_name,epoch_name,position_valid_times)
 
-    StateScript = pd.DataFrame(
-        (TrialChoice & {'nwb_file_name':nwb_copy_file_name,'epoch':int(epoch_name[:2])}).fetch1('choice_reward')
-    )
-    trial_1_t = StateScript.loc[1].timestamp_O
-    trial_last_t = StateScript.loc[len(StateScript)-1].timestamp_O
-
     position_info = load_position(nwb_copy_file_name,position_interval)
     position_info_upsample = interpolate_to_new_time(position_info, filtered_lfps_t)
-    position_info_upsample = removeDataBeforeTrial1(position_info_upsample,trial_1_t,trial_last_t)
     position_info_upsample = removeArtifactTime(position_info_upsample, filtered_lfps)
+
+    # For a run session, remove Data before 1st trial and after last trial and artifact
+    if is_run_session:
+        StateScript = pd.DataFrame(
+            (TrialChoice & {'nwb_file_name':nwb_copy_file_name,'epoch':int(epoch_name[:2])}).fetch1('choice_reward')
+        )
+        trial_1_t = StateScript.loc[1].timestamp_O
+        trial_last_t = StateScript.loc[len(StateScript)-1].timestamp_O
+
+        position_info_upsample = removeDataBeforeTrial1(position_info_upsample,trial_1_t,trial_last_t)
 
     position_info_upsample2 = interpolate_to_new_time(position_info_upsample, mua_time_ds)
 

@@ -165,6 +165,7 @@ class IntervalLinearizedPosition(SpyglassMixin, dj.Computed):
             ],
             sensor_std_dev=linearization_parameters["sensor_std_dev"],
             diagonal_bias=linearization_parameters["diagonal_bias"],
+            edge_map = track_graph_info['edge_map']
         )
 
         linear_position_df["time"] = time

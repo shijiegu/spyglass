@@ -108,11 +108,11 @@ def concatenate_by_type(ripple_times, cont = True):
     intvl_all = np.concatenate(intvl_all)
     return intvl_all
 
-def get_nwb_units(nwb_copy_file_name,session_name,sort_group_ids_with_good_cell):
+def get_nwb_units(nwb_copy_file_name,session_name,sort_group_ids_with_good_cell,curation_id = 0):
     """kept for legacy, but use the function session_unit() in singleUnit instead"""
     nwb_units_all = {}
     for sort_group_id in sort_group_ids_with_good_cell:
-        nwb_units = electrode_unit(nwb_copy_file_name,session_name,sort_group_id)
+        nwb_units = electrode_unit(nwb_copy_file_name,session_name,sort_group_id,curation_id = curation_id)
         nwb_units_all[sort_group_id] = nwb_units
     return nwb_units_all
 
@@ -133,25 +133,41 @@ def find_spike_count_ratio(nwb_units_all,ripple_times, use_rate= False):
 
     # find the firing ratio between frag and cont, define RATIO_THRESHOLD using this histogram
     ratio = []
+    unit_name = []
+    ratio_dict = {}
     for e in sort_group_ids_with_good_cell:
         for u in list(firing_rate_F[e].keys()):
+            unit_name.append((e,u))
+            
             (rate_F, count_F, _) = firing_rate_F[e][u]
             (rate_C, count_C, _) = firing_rate_C[e][u]
             if use_rate:
                 if rate_C > 0:
                     ratio.append(rate_F/rate_C)
+                    ratio_dict[(e,u)] = rate_F/rate_C
                 elif rate_C == 0 and rate_F > 0:
                     ratio.append(100)
+                    ratio_dict[(e,u)] = 100
+                elif rate_F == 0 and rate_C > 0:
+                    ratio.append(0.001)
+                    ratio_dict[(e,u)] = 0.001
                 else:
-                    ratio.append(0)
+                    ratio.append(np.nan)
+                    ratio_dict[(e,u)] = np.nan
             else:
-                if count_C > 0:
-                    ratio.append(count_F/count_C)
-                elif count_C == 0 and count_F > 0:
+                if count_C == 0 and count_F > 0:
                     ratio.append(100)
+                    ratio_dict[(e,u)] = 100
+                elif count_F == 0 and count_C > 0:
+                    ratio.append(0.001)
+                    ratio_dict[(e,u)] = 0.001
+                elif count_C == 0 and count_F == 0:
+                    ratio.append(np.nan)
+                    ratio_dict[(e,u)] = np.nan
                 else:
-                    ratio.append(0)
-    return ratio, firing_rate_F, firing_rate_C
+                    ratio.append(count_F/count_C)
+                    ratio_dict[(e,u)] = count_F/count_C
+    return ratio, ratio_dict, firing_rate_F, firing_rate_C, unit_name
 
 
 def sum_place_field_by_weight(normalized_placefields,activate_cell_cont,weights):

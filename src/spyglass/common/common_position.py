@@ -96,7 +96,10 @@ class IntervalPositionInfo(SpyglassMixin, dj.Computed):
         raw_position = RawPosition.PosObject & key
         spatial_series = raw_position.fetch_nwb()[0]["raw_position"]
         spatial_df = raw_position.fetch1_dataframe()
-
+        
+        # there can be duplicate rows in raw position coordinate
+        spatial_df = spatial_df[~spatial_df.index.duplicated(keep='first')]
+        
         position_info_parameters = (PositionInfoParameters() & key).fetch1()
 
         position_info = self.calculate_position_info(

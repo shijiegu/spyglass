@@ -1,7 +1,7 @@
 import numpy as np
 import spyglass as nd
 import pandas as pd
-from spyglass.shijiegu.Analysis_SGU import (TrialChoice,TrialChoiceReplay)
+from spyglass.shijiegu.Analysis_SGU import (TrialChoice,TrialChoiceReplayTransition)
 
 
 def count_replay_by_category(replay_df,tally_df,category_names):
@@ -51,11 +51,18 @@ def unravel_replay(replay_list):
     # This function only keeps the first level.
     replay_df=[]
     for t in range(len(replay_list)):
-        replay_t=replay_list[t]
-        replay_t_unraveled=[]
-        for ri in range(len(replay_t)):
-            for seg in replay_t[ri]:
-                replay_t_unraveled.append(seg)
+        replay_t = replay_list[t]
+        if len(replay_t) > 0:
+            replay_t_nonempty = [r for r in replay_t if len(r)>0]
+            if len(replay_t_nonempty) > 0:
+                replay_t_unraveled = np.concatenate(replay_t_nonempty)
+            else:
+                replay_t_unraveled = []
+        else:
+            replay_t_unraveled = []
+        #for ri in range(len(replay_t)):
+        #    for seg in replay_t[ri]:
+        #        replay_t_unraveled.append(seg)
         replay_df.append(replay_t_unraveled)
     return replay_df
 
@@ -87,18 +94,23 @@ def simulate_random_replay(replay_df):
     return replay_df_random
 
 
-def replay_in_categories(nwb_copy_file_name,epoch_num,categories_H,
-                        simulate_random_flag=False):
+def replay_in_categories(nwb_copy_file_name,epoch_name,categories_H,
+                         classifier_param_name = 'default_decoding_gpu_4armMaze',
+                         encoding_set = '2Dheadspeed_above_4',
+                         simulate_random_flag=False):
     '''
     the MASTER function of this script.
     '''
 
     # Behavior: find trials where categories are distinct outer arms
-    behav_df_all=find_distinct_subset(nwb_copy_file_name,epoch_num,np.setdiff1d(categories_H,['home']))
+    behav_df_all=find_distinct_subset(nwb_copy_file_name,epoch_name,np.setdiff1d(categories_H,['home']))
     
     # Replay:
-    key={'nwb_file_name':nwb_copy_file_name,'epoch':epoch_num}
-    replay_df_all=pd.DataFrame((TrialChoiceReplay & key).fetch1('choice_reward_replay'))
+    key={'nwb_file_name':nwb_copy_file_name,
+         'interval_list_name':epoch_name,
+         'classifier_param_name':classifier_param_name,
+         'encoding_set':encoding_set}
+    replay_df_all=pd.DataFrame((TrialChoiceReplayTransition & key).fetch1('choice_reward_replay_transition'))
     subset_ind=np.intersect1d(behav_df_all.index,replay_df_all.index)
     
     # Restrict to the subset where we have replay
@@ -109,9 +121,11 @@ def replay_in_categories(nwb_copy_file_name,epoch_num,categories_H,
     
     if len(np.intersect1d(categories_H,['current']))>0:
         replay_H=list(replay_df_all.loc[subset_ind,'replay_O'])
+        replay_df_H=unravel_replay(replay_H)
     else:
-        replay_H=list(replay_df_all.loc[subset_ind,'replay_H'])
-    replay_df_H=unravel_replay(replay_H)
+        replay_H=list(replay_df_all.loc[subset_ind,'replayed_singletons'])
+
+        replay_df_H = replay_H
     
     if simulate_random_flag:
         replay_df_H=simulate_random_replay(replay_df_H)
@@ -119,17 +133,22 @@ def replay_in_categories(nwb_copy_file_name,epoch_num,categories_H,
     
     return counts
 
-def category_day(nwb_copy_file_name,epochs,
+def category_day(nwb_copy_file_name,epochs,#name of the epochs
                  categories_H,
                  plot_categories_H,
+                 classifier_param_name = 'default_decoding_gpu_4armMaze',
+                 encoding_set = '2Dheadspeed_above_4',
                  simulate_random_flag=False):
     count_H_day={}
     for c in categories_H:
         count_H_day[c]=0
 
-    for epoch_num in epochs:
+    for epoch_names in epochs:
         count_H=replay_in_categories(nwb_copy_file_name,
-                                     epoch_num,categories_H,simulate_random_flag)
+                                     epoch_names,categories_H,
+                                     classifier_param_name = classifier_param_name,
+                                     encoding_set = encoding_set,
+                                     simulate_random_flag = simulate_random_flag)
         for c in categories_H:
             count_H_day[c]+=count_H[c]
 

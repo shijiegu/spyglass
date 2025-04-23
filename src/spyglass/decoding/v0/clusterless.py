@@ -333,7 +333,10 @@ class UnitMarksIndicator(SpyglassMixin, dj.Computed):
 
     def make(self, key):
         # TODO: intersection of sort interval and interval list
-        interval_times = (IntervalList & key).fetch1("valid_times")
+        interval_times = (IntervalList() & {"nwb_file_name":key["nwb_file_name"],
+                  "interval_list_name":key["artifact_removed_interval_list_name"]}).fetch1("valid_times")
+        
+        #interval_times = (IntervalList & key).fetch1("valid_times")
 
         sampling_rate = (UnitMarksIndicatorSelection & key).fetch(
             "sampling_rate"
@@ -343,9 +346,17 @@ class UnitMarksIndicator(SpyglassMixin, dj.Computed):
 
         time = self.get_time_bins_from_interval(interval_times, sampling_rate)
 
+        # the following 2 lines are needed because the first and last index entry must be in the marks_df index
+        time_min = marks_df.index[np.argwhere(marks_df.index >= time.min()).ravel()[0]]
+        time_max = marks_df.index[np.argwhere(marks_df.index <= time.max()).ravel()[-1]]
+        time1 = np.argwhere(time>=time_min).ravel()[0]
+        time2 = np.argwhere(time<=time_max).ravel()[-1]
+
         # Bin marks into time bins. No spike bins will have NaN
-        marks_df = marks_df.loc[time.min() : time.max()]
-        time_index = np.digitize(marks_df.index, time[1:-1])
+        #marks_df = marks_df.loc[time.min() : time.max()]
+        marks_df = marks_df.loc[time_min : time_max]
+        #time_index = np.digitize(marks_df.index, time[1:-1])
+        time_index = np.digitize(marks_df.index, time[time1:time2])
         marks_indicator_df = (
             marks_df.groupby(time[time_index])
             .mean()

@@ -61,9 +61,9 @@ def load_session_name(nwb_copy_file_name):
     for epoch in (TaskEpoch & {'nwb_file_name': nwb_copy_file_name}).fetch('epoch'):
         query['epoch'] = epoch
         n = (TaskEpoch & query).fetch1('interval_list_name')
-        if (TaskEpoch & query).fetch1('task_name') == 'sleep':
+        if 'sleep' in (TaskEpoch & query).fetch1('task_name'):
             sleep_interval.append(n)
-        elif (TaskEpoch & query).fetch1('task_name') == 'maze':
+        elif 'maze' in (TaskEpoch & query).fetch1('task_name'):
             session_interval.append(n)
 
     return session_interval, sleep_interval
@@ -139,7 +139,10 @@ def load_epoch_data(nwb_copy_file_name,epoch_num,
                                         'epoch':epoch_num}).fetch1('ca1_tetrode_ind')
     CCTetrodeInd = (TetrodeNumber() & {'nwb_file_name': nwb_copy_file_name,
                                         'epoch':epoch_num}).fetch1('cc_tetrode_ind')
-    TetrodeInd = CA1TetrodeInd + CCTetrodeInd
+    if type(CA1TetrodeInd) == list:
+        TetrodeInd = CA1TetrodeInd + CCTetrodeInd
+    else:
+        TetrodeInd = np.array(CA1TetrodeInd).tolist() + np.array(CCTetrodeInd).tolist()
     lfp_df = pd.DataFrame(data=np.array(lfp)[:,TetrodeInd], index=lfp_t)
     lfp_df.index.name='time'
     lfp_df=xr.Dataset.from_dataframe(lfp_df)
@@ -201,7 +204,10 @@ def load_LFP(nwb_copy_file_name,epoch_name):
 
     lfp_data=lfp_nwb[0]['lfp'].data
     lfp_timestamps=np.array(lfp_nwb[0]['lfp'].timestamps)
-    return lfp_data,lfp_timestamps
+    
+    notnan_ind = ~np.isnan(lfp_timestamps)
+    
+    return lfp_data[notnan_ind,:],lfp_timestamps[notnan_ind]
 
 def load_theta(nwb_copy_file_name,epoch_name):
     # TO DO. USE ARTIFACT REMOVED
@@ -211,7 +217,9 @@ def load_theta(nwb_copy_file_name,epoch_name):
 
     theta_data=theta_nwb[0]['filtered_data'].data
     theta_timestamps=np.array(theta_nwb[0]['filtered_data'].timestamps)
-    return theta_data,theta_timestamps
+    
+    notnan_ind = ~np.isnan(theta_timestamps)
+    return theta_data[notnan_ind,:],theta_timestamps[notnan_ind]
 
 def load_theta_maze(nwb_copy_file_name,epoch_name):
     """load theta, maze time only"""
@@ -252,24 +260,29 @@ def load_spike(nwb_copy_file_name,interval_list_name,tetrode_list=[100,101]):
     neural_ts=[]
     neural_datas=[]
     for tetrode in tetrode_list:
-        recording_path = (SpikeSortingRecording & {'nwb_file_name' : nwb_copy_file_name,
-                                                   'sort_interval_name' : interval_list_name,
-                                                   'sort_group_id' : tetrode}).fetch1('recording_path')
-        recording = si.load_extractor(recording_path)
-        if recording.get_num_segments() > 1 and isinstance(recording, si.AppendSegmentRecording):
-            recording = si.concatenate_recordings(recording.recording_list)
-        elif recording.get_num_segments() > 1 and isinstance(recording, si.BinaryRecordingExtractor):
-            recording = si.concatenate_recordings([recording])
+        key = {'nwb_file_name' : nwb_copy_file_name,
+               'sort_interval_name' : interval_list_name,
+               'sort_group_id' : tetrode}
+        if len(SpikeSortingRecording & key) > 0:
+            recording_path = (SpikeSortingRecording & key).fetch1('recording_path')
+            recording = si.load_extractor(recording_path)
+            if recording.get_num_segments() > 1 and isinstance(recording, si.AppendSegmentRecording):
+                recording = si.concatenate_recordings(recording.recording_list)
+            elif recording.get_num_segments() > 1 and isinstance(recording, si.BinaryRecordingExtractor):
+                recording = si.concatenate_recordings([recording])
 
-        neural_data = recording.get_traces()
-        neural_t = SpikeSortingRecording._get_recording_timestamps(recording)
+            neural_data = recording.get_traces()
+            neural_t = SpikeSortingRecording._get_recording_timestamps(recording)
 
-        recordings.append(recording)
-        neural_ts.append(neural_t)
-        neural_datas.append(neural_data)
+            recordings.append(recording)
+            
+            notnan_ind = ~np.isnan(neural_t)
+            neural_ts.append(neural_t[notnan_ind])
+            neural_datas.append(neural_data[notnan_ind,:])
 
+    
     neural_data=np.concatenate(neural_datas,axis=1)
-    mua_time=neural_ts[0] ### CHECK THIS!!!!
+    mua_time=neural_ts[0] ### Because sort group 100, 101 corresponds to the right, left side of hemisphere. 
     mua=get_multiunit_population_firing_rate(neural_data<=-60,30000,
                                              smoothing_sigma=100/30000)
     assert len(mua)==len(mua_time)
@@ -294,15 +307,15 @@ def load_maze_spike(nwb_copy_file_name,interval_list_name,tetrode_list=[100,101]
 
     t_ind = np.logical_and(neural_ts[0] >= trial_1_t,neural_ts[0] <= trial_last_t)
 
-
-    neural_ts[0] = neural_ts[0][t_ind]
-    neural_ts[1] = neural_ts[1][t_ind]
+    for i in range(len(neural_ts)):
+        neural_ts[i] = neural_ts[i][t_ind]
 
     mua_time = mua_time[t_ind]
 
     neural_data = neural_data[t_ind,:]
     mua = mua[t_ind]
 
+    assert neural_data.shape[0] == neural_ts[0].shape[0]
     return neural_data,neural_ts,mua_time,mua,channel_IDs
 
 def load_zscored_ripple_consensus(nwb_copy_file_name, session_name, pos_name):

@@ -1,0 +1,55 @@
+import spyglass as nd
+import pandas as pd
+import numpy as np
+import xarray as xr
+from scipy import stats
+from scipy import linalg
+from scipy import ndimage
+import matplotlib.pyplot as plt
+from spyglass.common import (Session, IntervalList,LabMember, LabTeam, Raw, Session, Nwbfile,
+                            Electrode,LFPBand,interval_list_intersect)
+from spyglass.common import TaskEpoch
+from spyglass.spikesorting.v0 import (SortGroup, 
+                                    SpikeSortingRecording,SpikeSortingRecordingSelection)
+from spyglass.utils.nwb_helper_fn import get_nwb_copy_filename
+from spyglass.common.common_position import IntervalPositionInfo, RawPosition, IntervalLinearizedPosition, TrackGraph
+
+from ripple_detection.core import segment_boolean_series
+
+from spyglass.shijiegu.Analysis_SGU import TrialChoice,EpochPos,MUA,get_linearization_map
+from spyglass.shijiegu.decodeHelpers import runSessionNames
+from spyglass.shijiegu.ripple_add_replay import plot_decode_spiking,select_subset_helper
+from spyglass.shijiegu.changeOfMind import (find_turnaround_time, findProportion,
+            find_trials, load_epoch_data_wrapper, find_direction, find_trials_animal)
+from spyglass.shijiegu.load import load_decode
+
+def plot_physical_vs_mental_position(animal,triggered_positions_abs,
+                                     triggered_decodes_abs):
+    """the function signature is misleading, 
+    the <triggered_position_abs> should expect base subtracted triggered_position.
+    the <triggered_decodes_abs> should expect base subtracted triggered_decodes."""
+    (positions_abs, decodes_abs) = (triggered_positions_abs[animal], triggered_decodes_abs[animal])
+    
+    plt.figure(figsize=(5,5))
+    ax1 = plt.gca()
+    for rendition_ind in range(len(positions_abs)):
+        position_abs = positions_abs[rendition_ind]
+        decode_abs = decodes_abs[rendition_ind]
+        if len(position_abs) == len(decode_abs):
+            ax1.plot(np.array(decode_abs), np.array(position_abs), linewidth = 1, alpha = 0.5)
+        else:
+            print(rendition_ind)
+    ax1.plot([0,ax1.get_ylim()[1]],[0,ax1.get_ylim()[1]],linestyle=":",color = "k",alpha = 0.5)
+    
+    ax1.axvline(86-18,linestyle=":",color = "k",alpha = 0.5)
+    ax1.set_xlim([-1, 87])
+    #ax1.set_ylim([-1, 87])
+    ax1.set_aspect('equal')
+    ax1.set_title(animal + "\n animal position (y) vs decoded position (x)")
+    
+    #ax2.set_title("decoded position relative to stopping")
+    
+    ax1.set_ylabel("linearized location (cm)")
+    ax1.set_xlabel("decoded linearized loc (cm)")
+    #ax2.set_ylabel("linearized location (cm)")
+    #plt.gca().set_aspect('equal')

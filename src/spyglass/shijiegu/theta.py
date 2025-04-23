@@ -100,9 +100,10 @@ def theta_parser_master(nwb_copy_file_name, pos_name, session_name, nwb_units_al
     if 'head_orientation' in theta_intervals_df.columns:
         theta_intervals_df = theta_intervals_df.drop(columns = ['head_orientation'])
 
-    theta_intervals_df = add_trial(theta_intervals_df,log_df)
+    
     theta_intervals_df = add_location(theta_intervals_df,
                                     linear_position_df,welllocations,colind = 3)
+    theta_intervals_df = add_trial(theta_intervals_df,log_df)
     theta_intervals_df = add_head_orientation(theta_intervals_df,
                                               head_orientation,colind =  5)
 
@@ -187,6 +188,7 @@ def return_theta_phase_histogram(pos1d,pos2d,theta_df,nwb_units_all,unitID):
 
     # only movement data
     pos2d = interpolate_to_new_time(pos2d,spike_time)
+    pos1d = interpolate_to_new_time(pos1d,spike_time)
     mobility_index = np.argwhere(pos2d.head_speed > 4).ravel() # >4cm/s
     pos1d = pos1d.iloc[mobility_index]
     spike_time = spike_time[mobility_index]
@@ -215,11 +217,93 @@ def return_theta_offset(pos1d,pos2d,theta_df,nwb_units_all,cell_list):
 
     return delta
 
-def return_theta_phase_location(pos1d,pos2d,theta_df,nwb_units_all,unitID):
+def return_firing(pos1d,pos2d,nwb_units_all,unitID):
+    """
+    Use this function to find cell's preferential arm and direction.
+    bin spike times into 4 arms, 2 directions (inbound and outbound)
+    """
+    # delta is the shift that allows
+    (e,u) = unitID
+
+    nwb_e = nwb_units_all[e]
+    spike_time = nwb_e.loc[u].spike_times
+
+    spike_time = spike_time[np.logical_and(spike_time>=pos1d.index[0],
+                                           spike_time<=pos1d.index[-1])]
+
+    pos1d_spike_time_all = interpolate_to_new_time(pos1d,spike_time)
+    pos2d_spike_time_all = interpolate_to_new_time(pos2d,spike_time)
+
+    mobility_index = np.argwhere(pos2d_spike_time_all.head_speed > 4).ravel() # >4cm/s
+
+    # the 2 tables for phase precession plot
+    pos1d_spike_time = pos1d_spike_time_all.iloc[mobility_index]
+    pos2d_spike_time = pos2d_spike_time_all.iloc[mobility_index]
+
+    # split into inbound and outbound
+    arms = {}
+    for a in [0,1,2,3,4]:
+        arms[a] = {}
+    direction_names = ['inbound','outbound']
+    direction = (pos2d_spike_time.head_orientation > 0,pos2d_spike_time.head_orientation < 0)
+    
+    # get time
+    # first row is inbound, second row in outbound
+    time_array = np.zeros((2,5))
+    camera_delta_t = stats.mode(np.diff(pos2d.index))[0]
+        
+    for a in [0,1,2,3,4]:
+        mode = a + 5
+        place_range, _ = segment_to_linear_range(linear_map,mode)
+        time_ind = np.logical_and(pos1d.linear_position >= place_range[0],
+                                      pos1d.linear_position <= place_range[1])
+        pos2d_a = pos2d[time_ind]
+        
+        time_array[0,a] = camera_delta_t * len(pos2d_a[pos2d_a.head_orientation > 0])
+        time_array[1,a] = camera_delta_t * len(pos2d_a[pos2d_a.head_orientation < 0])
+    
+    # count spikes
+    for i in range(2): # the 2 directions
+        # the video was recorded upside down, so negatove head orientation is outbound
+
+        # restrict to a direction
+        pos1d_spike_time_dir = pos1d_spike_time[direction[i]]
+            
+        if len(pos1d_spike_time_dir) == 0:
+            for a in [0,1,2,3,4]:
+                arms[a][direction_names[i]] = np.nan
+            continue
+
+        for a in [0,1,2,3,4]:
+            mode = a + 5
+            place_range, arms[a][direction_names[i]] = segment_to_linear_range(linear_map,mode)
+            time_ind = np.logical_and(pos1d_spike_time_dir['linear_position']>=place_range[0],
+                            pos1d_spike_time_dir['linear_position']<=place_range[1])
+
+            arms[a][direction_names[i]] = np.array(pos1d_spike_time_dir['linear_position'])[time_ind]
+            
+    # return in array:
+    # first row is inbound, second row in outbound
+    arms_array = np.zeros((2,5))
+    for a in [0,1,2,3,4]:
+        if np.isnan(arms[a]['inbound']).all():
+            arms_array[0,a] = np.nan
+        else:
+            arms_array[0,a] = len(arms[a]['inbound'])
+        
+        if np.isnan(arms[a]['outbound']).all():
+            arms_array[1,a] = np.nan
+        else:
+            arms_array[1,a] = len(arms[a]['outbound'])
+    return arms, arms_array, time_array
+
+def return_theta_phase_location(pos1d,pos2d,theta_df,nwb_units_all,unitID,one_segment = True):
     """
     (for phase precession plots)
     for each unit (unitID, electrode - unit tuple)'s every spike,
     return tuples of theta phase and animal location, split among inbound and outbound
+        By default, return only the arm in which the cell fires the most.
+        Otherwise, return all 4-arm firing in both inbound and outbound directions.
     """
     # delta is the shift that allows
     (e,u) = unitID
@@ -245,26 +329,52 @@ def return_theta_phase_location(pos1d,pos2d,theta_df,nwb_units_all,unitID):
     pos_phase = {}
     arms = {}
     direction_names = ['outbound','inbound']
+    
+    if not one_segment:
+        for a in [1,2,3,4]:
+            arms[a] = {}
+            pos_phase[a] = {}
+            
     for i in range(2):
         direction = (pos2d_spike_time.head_orientation > 0,pos2d_spike_time.head_orientation < 0)
 
         # restrict to a direction
         pos1d_spike_time_dir = pos1d_spike_time[direction[i]]
         theta_df_spike_time_dir = theta_df_spike_time[direction[i]]
+        
+        if one_segment:
 
-        if len(pos1d_spike_time_dir) == 0:
-            pos_phase[direction_names[i]] = (pos1d_spike_time_dir['linear_position'],
-                                             theta_df_spike_time_dir['phase0'])
-            arms[direction_names[i]] = np.nan
-            continue
+            if len(pos1d_spike_time_dir) == 0:
+                pos_phase[direction_names[i]] = (pos1d_spike_time_dir['linear_position'],
+                                                theta_df_spike_time_dir['phase0'])
+                arms[direction_names[i]] = np.nan
+                continue
 
-        # restrict to one maze segment
-        mode, _ = stats.mode(pos1d_spike_time_dir.track_segment_id)
-        place_range, arms[direction_names[i]] = segment_to_linear_range(linear_map,mode)
-        time_ind = np.logical_and(pos1d_spike_time_dir['linear_position']>=place_range[0],
-                              pos1d_spike_time_dir['linear_position']<=place_range[1])
+            # restrict to one maze segment
+            mode, _ = stats.mode(pos1d_spike_time_dir.track_segment_id)
+            place_range, arms[direction_names[i]] = segment_to_linear_range(linear_map,mode)
+            time_ind = np.logical_and(pos1d_spike_time_dir['linear_position']>=place_range[0],
+                                pos1d_spike_time_dir['linear_position']<=place_range[1])
 
-        pos_phase[direction_names[i]] = (pos1d_spike_time_dir['linear_position'][time_ind],theta_df_spike_time_dir['phase0'][time_ind])
+            pos_phase[direction_names[i]] = (pos1d_spike_time_dir['linear_position'][time_ind],theta_df_spike_time_dir['phase0'][time_ind])
+        
+        else:
+            
+            if len(pos1d_spike_time_dir) == 0:
+                for a in [1,2,3,4]:
+                    pos_phase[a][direction_names[i]] = (pos1d_spike_time_dir['linear_position'],
+                                                    theta_df_spike_time_dir['phase0'])
+                    arms[a][direction_names[i]] = np.nan
+                continue
+
+            for a in [1,2,3,4]:
+                mode = a + 5
+                place_range, arms[a][direction_names[i]] = segment_to_linear_range(linear_map,mode)
+                time_ind = np.logical_and(pos1d_spike_time_dir['linear_position']>=place_range[0],
+                                pos1d_spike_time_dir['linear_position']<=place_range[1])
+
+                pos_phase[a][direction_names[i]] = (pos1d_spike_time_dir['linear_position'][time_ind],theta_df_spike_time_dir['phase0'][time_ind])
+            
 
     return pos_phase,arms
 
