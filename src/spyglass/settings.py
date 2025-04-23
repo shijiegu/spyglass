@@ -7,6 +7,7 @@ import datajoint as dj
 import yaml
 from pymysql.err import OperationalError
 
+from spyglass.utils.dj_helper_fn import str_to_bool
 from spyglass.utils.logging import logger
 
 
@@ -20,7 +21,7 @@ class SpyglassConfig:
     facilitate testing.
     """
 
-    def __init__(self, base_dir: str = None, **kwargs):
+    def __init__(self, base_dir: str = None, **kwargs) -> None:
         """
         Initializes a new instance of the class.
 
@@ -60,6 +61,7 @@ class SpyglassConfig:
 
         self.relative_dirs = {
             # {PREFIX}_{KEY}_DIR, default dir relative to base_dir
+            # NOTE: Adding new dir requires edit to HHMI hub
             "spyglass": {
                 "raw": "raw",
                 "analysis": "analysis",
@@ -68,9 +70,10 @@ class SpyglassConfig:
                 "waveforms": "waveforms",
                 "temp": "tmp",
                 "video": "video",
+                "export": "export",
             },
             "kachery": {
-                "cloud": "kachery_storage",
+                "cloud": ".kachery-cloud",
                 "storage": "kachery_storage",
                 "temp": "tmp",
             },
@@ -78,6 +81,10 @@ class SpyglassConfig:
                 "project": "projects",
                 "video": "video",
                 "output": "output",
+            },
+            "moseq": {
+                "project": "projects",
+                "video": "video",
             },
         }
         self.dj_defaults = {
@@ -96,8 +103,12 @@ class SpyglassConfig:
         }
 
     def load_config(
-        self, base_dir=None, force_reload=False, on_startup: bool = False
-    ):
+        self,
+        base_dir=None,
+        force_reload=False,
+        on_startup: bool = False,
+        **kwargs,
+    ) -> None:
         """
         Loads the configuration settings for the object.
 
@@ -132,9 +143,14 @@ class SpyglassConfig:
         dj_spyglass = dj_custom.get("spyglass_dirs", {})
         dj_kachery = dj_custom.get("kachery_dirs", {})
         dj_dlc = dj_custom.get("dlc_dirs", {})
+        dj_moseq = dj_custom.get("moseq_dirs", {})
 
         self._debug_mode = dj_custom.get("debug_mode", False)
-        self._test_mode = dj_custom.get("test_mode", False)
+        self._test_mode = kwargs.get("test_mode") or dj_custom.get(
+            "test_mode", False
+        )
+        self._test_mode = str_to_bool(self._test_mode)
+        self._debug_mode = str_to_bool(self._debug_mode)
 
         resolved_base = (
             base_dir
@@ -163,9 +179,22 @@ class SpyglassConfig:
         )
         Path(self._dlc_base).mkdir(exist_ok=True)
 
+        self._moseq_base = (
+            dj_moseq.get("base")
+            or os.environ.get("MOSEQ_BASE_DIR")
+            or str(Path(resolved_base) / "moseq")
+        )
+        Path(self._moseq_base).mkdir(exist_ok=True)
+
         config_dirs = {"SPYGLASS_BASE_DIR": str(resolved_base)}
+        source_config_lookup = {
+            "dlc": dj_dlc,
+            "moseq": dj_moseq,
+            "kachery": dj_kachery,
+        }
+        base_lookup = {"dlc": self._dlc_base, "moseq": self._moseq_base}
         for prefix, dirs in self.relative_dirs.items():
-            this_base = self._dlc_base if prefix == "dlc" else resolved_base
+            this_base = base_lookup.get(prefix, resolved_base)
             for dir, dir_str in dirs.items():
                 dir_env_fmt = self.dir_to_var(dir=dir, dir_type=prefix)
 
@@ -174,11 +203,9 @@ class SpyglassConfig:
                     if not self.supplied_base_dir
                     else None
                 )
-
+                source_config = source_config_lookup.get(prefix, dj_spyglass)
                 dir_location = (
-                    dj_spyglass.get(dir)
-                    or dj_kachery.get(dir)
-                    or dj_dlc.get(dir)
+                    source_config.get(dir)
                     or env_loc
                     or str(Path(this_base) / dir_str)
                 ).replace('"', "")
@@ -212,25 +239,26 @@ class SpyglassConfig:
 
         return self._config
 
-    def _load_env_vars(self):
+    def _load_env_vars(self) -> dict:
         loaded_dict = {}
         for var, val in self.env_defaults.items():
             loaded_dict[var] = os.getenv(var, val)
         return loaded_dict
 
-    def _set_env_with_dict(self, env_dict):
+    def _set_env_with_dict(self, env_dict) -> None:
         # NOTE: Kept for backwards compatibility. Should be removed in future
         # for custom paths. Keep self.env_defaults.
+        # SPYGLASS_BASE_DIR may be used for docker assembly of export
         for var, val in env_dict.items():
             os.environ[var] = str(val)
 
-    def _mkdirs_from_dict_vals(self, dir_dict):
+    def _mkdirs_from_dict_vals(self, dir_dict) -> None:
         if self._debug_mode:
             return
         for dir_str in dir_dict.values():
             Path(dir_str).mkdir(exist_ok=True)
 
-    def _set_dj_config_stores(self, check_match=True, set_stores=True):
+    def _set_dj_config_stores(self, check_match=True, set_stores=True) -> None:
         """
         Checks dj.config['stores'] match resolved dirs. Ensures stores set.
 
@@ -276,7 +304,7 @@ class SpyglassConfig:
 
         return
 
-    def dir_to_var(self, dir: str, dir_type: str = "spyglass"):
+    def dir_to_var(self, dir: str, dir_type: str = "spyglass") -> str:
         """Converts a dir string to an env variable name."""
         return f"{dir_type.upper()}_{dir.upper()}_DIR"
 
@@ -289,7 +317,7 @@ class SpyglassConfig:
         database_port: int = 3306,
         database_use_tls: bool = True,
         **kwargs,
-    ):
+    ) -> dict:
         """Generate a datajoint configuration file.
 
         Parameters
@@ -334,7 +362,7 @@ class SpyglassConfig:
         base_dir=None,
         set_password=True,
         **kwargs,
-    ):
+    ) -> None:
         """Set the dj.config parameters, set password, and save config to file.
 
         Parameters
@@ -450,6 +478,7 @@ class SpyglassConfig:
                     "waveforms": self.waveforms_dir,
                     "temp": self.temp_dir,
                     "video": self.video_dir,
+                    "export": self.export_dir,
                 },
                 "kachery_dirs": {
                     "cloud": self.config.get(
@@ -466,46 +495,65 @@ class SpyglassConfig:
                     "video": self.dlc_video_dir,
                     "output": self.dlc_output_dir,
                 },
+                "moseq_dirs": {
+                    "base": self._moseq_base,
+                    "project": self.moseq_project_dir,
+                    "video": self.moseq_video_dir,
+                },
                 "kachery_zone": "franklab.default",
             }
         }
 
     @property
     def config(self) -> dict:
+        """Dictionary of config settings."""
         self.load_config()
         return self._config
 
     @property
     def base_dir(self) -> str:
+        """Base directory as a string."""
         return self.config.get(self.dir_to_var("base"))
 
     @property
     def raw_dir(self) -> str:
+        """Raw data directory as a string."""
         return self.config.get(self.dir_to_var("raw"))
 
     @property
     def analysis_dir(self) -> str:
+        """Analysis directory as a string."""
         return self.config.get(self.dir_to_var("analysis"))
 
     @property
     def recording_dir(self) -> str:
+        """Recording directory as a string."""
         return self.config.get(self.dir_to_var("recording"))
 
     @property
     def sorting_dir(self) -> str:
+        """Sorting directory as a string."""
         return self.config.get(self.dir_to_var("sorting"))
 
     @property
     def waveforms_dir(self) -> str:
+        """Waveforms directory as a string."""
         return self.config.get(self.dir_to_var("waveforms"))
 
     @property
     def temp_dir(self) -> str:
+        """Temp directory as a string."""
         return self.config.get(self.dir_to_var("temp"))
 
     @property
     def video_dir(self) -> str:
+        """Video directory as a string."""
         return self.config.get(self.dir_to_var("video"))
+
+    @property
+    def export_dir(self) -> str:
+        """Export directory as a string."""
+        return self.config.get(self.dir_to_var("export"))
 
     @property
     def debug_mode(self) -> bool:
@@ -524,15 +572,28 @@ class SpyglassConfig:
 
     @property
     def dlc_project_dir(self) -> str:
+        """DLC project directory as a string."""
         return self.config.get(self.dir_to_var("project", "dlc"))
 
     @property
     def dlc_video_dir(self) -> str:
+        """DLC video directory as a string."""
         return self.config.get(self.dir_to_var("video", "dlc"))
 
     @property
     def dlc_output_dir(self) -> str:
+        """DLC output directory as a string."""
         return self.config.get(self.dir_to_var("output", "dlc"))
+
+    @property
+    def moseq_project_dir(self) -> str:
+        """Moseq project directory as a string."""
+        return self.config.get(self.dir_to_var("project", "moseq"))
+
+    @property
+    def moseq_video_dir(self) -> str:
+        """Moseq video directory as a string."""
+        return self.config.get(self.dir_to_var("video", "moseq"))
 
 
 sg_config = SpyglassConfig()
@@ -551,9 +612,12 @@ if sg_config.load_failed:  # Failed to load
     sorting_dir = None
     waveforms_dir = None
     video_dir = None
+    export_dir = None
     dlc_project_dir = None
     dlc_video_dir = None
     dlc_output_dir = None
+    moseq_project_dir = None
+    moseq_video_dir = None
 else:
     config = sg_config.config
     base_dir = sg_config.base_dir
@@ -564,9 +628,12 @@ else:
     sorting_dir = sg_config.sorting_dir
     waveforms_dir = sg_config.waveforms_dir
     video_dir = sg_config.video_dir
+    export_dir = sg_config.export_dir
     debug_mode = sg_config.debug_mode
     test_mode = sg_config.test_mode
     prepopulate = config.get("prepopulate", False)
     dlc_project_dir = sg_config.dlc_project_dir
     dlc_video_dir = sg_config.dlc_video_dir
     dlc_output_dir = sg_config.dlc_output_dir
+    moseq_project_dir = sg_config.moseq_project_dir
+    moseq_video_dir = sg_config.moseq_video_dir

@@ -42,26 +42,19 @@ theme:
 
 nav:
   - Home: index.md
-  - Installation: installation.md
-  - Miscellaneous:
-      - Overview: misc/index.md
-      - FigURL: misc/figurl_views.md
-      - Session Groups: misc/session_groups.md
-      - Insert Data: misc/insert_data.md
-      - Merge Tables: misc/merge_tables.md
-      - Database Management: misc/database_management.md
   - Tutorials:
       - Overview: notebooks/index.md
       - Intro:
           - Setup: notebooks/00_Setup.ipynb
-          - Insert Data: notebooks/01_Insert_Data.ipynb
-          - Data Sync: notebooks/02_Data_Sync.ipynb
-          - Merge Tables: notebooks/03_Merge_Tables.ipynb
-          - Config Populate: notebooks/04_PopulateConfigFile.ipynb
+          - Concepts: notebooks/01_Concepts.ipynb
+          - Insert Data: notebooks/02_Insert_Data.ipynb
+          - Data Sync: notebooks/03_Data_Sync.ipynb
+          - Merge Tables: notebooks/04_Merge_Tables.ipynb
+          - Export: notebooks/05_Export.ipynb
       - Spikes:
           - Spike Sorting V0: notebooks/10_Spike_SortingV0.ipynb
           - Spike Sorting V1: notebooks/10_Spike_SortingV1.ipynb
-          - Curation: notebooks/11_Curation.ipynb
+          - Spike Sorting Analysis: notebooks/11_Spike_Sorting_Analysis.ipynb
       - Position:
           - Position Trodes: notebooks/20_Position_Trodes.ipynb
           - DLC Models: notebooks/21_DLC.ipynb
@@ -72,11 +65,26 @@ nav:
           - Theta: notebooks/31_Theta.ipynb
           - Ripple Detection: notebooks/32_Ripple_Detection.ipynb
       - Decoding:
-          - Extract Clusterless: notebooks/41_Extracting_Clusterless_Waveform_Features.ipynb
-          - Decoding Clusterless: notebooks/42_Decoding_Clusterless.ipynb
-          - Decoding Sorted Spikes: notebooks/43_Decoding_SortedSpikes.ipynb
+          - Extracting Waveforms: notebooks/40_Extracting_Clusterless_Waveform_Features.ipynb
+          - Decoding Clusterless: notebooks/41_Decoding_Clusterless.ipynb
+          - Decoding Sorted Spikes: notebooks/42_Decoding_SortedSpikes.ipynb
+      - MUA Detection: notebooks/50_MUA_Detection.ipynb
+  - Features:
+    - Overview: Features/index.md
+    - FigURL: Features/FigURL.md
+    - Merge Tables: Features/Merge.md
+    - Export: Features/Export.md
+    - Centralized Code: Features/Mixin.md
+  - For Developers:
+    - Overview: ForDevelopers/index.md
+    - How to Contribute: ForDevelopers/Contribute.md
+    - Database Management: ForDevelopers/Management.md
+    - Code Reuse: ForDevelopers/Reuse.md
+    - Table Types: ForDevelopers/TableTypes.md
+    - Understanding a Schema: ForDevelopers/Schema.md
+    - Custom Pipelines: ForDevelopers/CustomPipelines.md
+    - Using NWB: ForDevelopers/UsingNWB.md
   - API Reference: api/ # defer to gen-files + literate-nav
-  - How to Contribute: contribute.md
   - Change Log: CHANGELOG.md
   - Copyright: LICENSE.md
 
@@ -103,6 +111,7 @@ plugins:
             group_by_category: false
             line_length: 80
             docstring_style: numpy
+          paths: [../src]
   - literate-nav:
       nav_file: navigation.md
   - exclude-search:
@@ -116,6 +125,7 @@ plugins:
       include_source: False
       ignore_h1_titles: True
       ignore: ["*make_pages.py", "**checkpoints**", "*/py_scripts/*"]
+  - mermaid2 # for graphs
 
 markdown_extensions:
   - attr_list

@@ -1,21 +1,25 @@
 # Tutorial Notebooks
 
 There are several paths one can take to these notebooks. The notebooks have
-two-digits in their names, the first of which indicates it's 'batch', as
+two-digits in their names, the first of which indicates its 'batch', as
 described in the categories below.
 
 ## 0. Intro
 
 Everyone should complete the [Setup](./00_Setup.ipynb) and
-[Insert Data](./01_Insert_Data.ipynb) notebooks.
+[Insert Data](./02_Insert_Data.ipynb) notebooks. The
+[Concepts](./01_Concepts.ipynb) notebook offers additional information that will
+help users understand the data structure and how to interact with it.
 
-[Data Sync](./02_Data_Sync.ipynb) is an optional additional tool for
+[Data Sync](./03_Data_Sync.ipynb) is an optional additional tool for
 collaborators that want to share analysis files.
 
-The [Merge Tables notebook](./03_Merge_Tables.ipynb) explains details on a new
-table tier unique to Spyglass that allows the user to use different versions of
-pipelines on the same data. This is important for understanding the later
-notebooks.
+The [Merge Tables notebook](./04_Merge_Tables.ipynb) explains details on a
+pipeline versioning technique unique to Spyglass. This is important for
+understanding the later notebooks.
+
+The [Export notebook](./05_Export.ipynb) shows how to export data from the
+database.
 
 ## 1. Spike Sorting Pipeline
 
@@ -23,12 +27,15 @@ This series of notebooks covers the process of spike sorting, from automated
 spike sorting to optional manual curation of the output of the automated
 sorting.
 
+Spikesorting results from any pipeline can then be organized and tracked using
+tools in [Spikesorting Analysis](./11_Spike_Sorting_Analysis.ipynb).
+
 ## 2. Position Pipeline
 
 This series of notebooks covers tracking the position(s) of the animal. The user
 can employ two different methods:
 
-1. the simple [Trodes](20_Position_Trodes.ipynb) methods of tracking LEDs on the
+1. The simple [Trodes](20_Position_Trodes.ipynb) methods of tracking LEDs on the
     animal's headstage
 2. [DLC (DeepLabCut)](./21_DLC.ipynb) which uses a neural network to track the
     animal's body parts.
@@ -55,14 +62,14 @@ Decoding can be from sorted or from unsorted data using spike waveform features
 (so-called clusterless decoding).
 
 The first notebook
-([Extracting Clusterless Waveform Features](./41_Extracting_Clusterless_Waveform_Features.ipynb))
+([Extracting Clusterless Waveform Features](./40_Extracting_Clusterless_Waveform_Features.ipynb))
 in this series shows how to retrieve the spike waveform features used for
 clusterless decoding.
 
-The second notebook ([Clusterless Decoding](./42_Decoding_Clusterless.ipynb))
+The second notebook ([Clusterless Decoding](./41_Decoding_Clusterless.ipynb))
 shows a detailed example of how to decode the position of the animal from the
 spike waveform features. The third notebook
-([Decoding](./43_Decoding_SortedSpikes.ipynb)) shows how to decode the position
+([Decoding](./42_Decoding_SortedSpikes.ipynb)) shows how to decode the position
 of the animal from the sorted spikes.
 
 ## Developer note
@@ -79,3 +86,11 @@ black .
 ```
 
 Unfortunately, jupytext-generated py script are not black-compliant by default.
+
+You can ensure black compliance with the `pre-commit` hook by running
+
+```bash
+pip install pre-commit
+```
+
+This will run black whenever you commit changes to the repository.

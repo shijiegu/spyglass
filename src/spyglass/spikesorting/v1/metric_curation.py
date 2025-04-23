@@ -1,5 +1,6 @@
 import os
 import uuid
+from time import time
 from typing import Any, Dict, List, Union
 
 import datajoint as dj
@@ -49,6 +50,30 @@ _comparison_to_function = {
 
 @schema
 class WaveformParameters(SpyglassMixin, dj.Lookup):
+    """Parameters for extracting waveforms from the recording based on sorting.
+
+    Parameters
+    ----------
+    waveform_param_name : str
+        Name of the waveform extraction parameters.
+    waveform_params : dict
+        A dictionary of waveform extraction parameters, including...
+        ms_before : float
+            Number of milliseconds before the spike time to include in the
+            waveform.
+        ms_after : float
+            Number of milliseconds after the spike time to include in the
+            waveform.
+        max_spikes_per_unit : int
+            Maximum number of spikes to include in the waveform for each unit.
+        n_jobs : int
+            Number of parallel jobs to use for waveform extraction.
+        total_memory : str
+            Total memory available for waveform extraction e.g. "5G".
+        whiten : bool
+            Whether to whiten the waveforms or not.
+    """
+
     definition = """
     # Parameters for extracting waveforms from the recording based on the sorting.
     waveform_param_name: varchar(80) # name of waveform extraction parameters
@@ -56,38 +81,32 @@ class WaveformParameters(SpyglassMixin, dj.Lookup):
     waveform_params: blob # a dict of waveform extraction parameters
     """
 
+    default_params = {
+        "ms_before": 0.5,
+        "ms_after": 0.5,
+        "max_spikes_per_unit": 5000,
+        "n_jobs": 5,
+        "total_memory": "5G",
+    }
     contents = [
-        [
-            "default_not_whitened",
-            {
-                "ms_before": 0.5,
-                "ms_after": 0.5,
-                "max_spikes_per_unit": 5000,
-                "n_jobs": 5,
-                "total_memory": "5G",
-                "whiten": False,
-            },
-        ],
-        [
-            "default_whitened",
-            {
-                "ms_before": 0.5,
-                "ms_after": 0.5,
-                "max_spikes_per_unit": 5000,
-                "n_jobs": 5,
-                "total_memory": "5G",
-                "whiten": True,
-            },
-        ],
+        ["default_not_whitened", {**default_params, "whiten": False}],
+        ["default_whitened", {**default_params, "whiten": True}],
     ]
 
     @classmethod
     def insert_default(cls):
+        """Insert default waveform parameters."""
         cls.insert(cls.contents, skip_duplicates=True)
 
 
 @schema
 class MetricParameters(SpyglassMixin, dj.Lookup):
+    """Parameters for computing quality metrics of sorted units.
+
+    See MetricParameters().show_available_metrics() for a list of available
+    metrics and their descriptions.
+    """
+
     definition = """
     # Parameters for computing quality metrics of sorted units.
     metric_param_name: varchar(200)
@@ -128,10 +147,12 @@ class MetricParameters(SpyglassMixin, dj.Lookup):
 
     @classmethod
     def insert_default(cls):
+        """Insert default metric parameters."""
         cls.insert(cls.contents, skip_duplicates=True)
 
     @classmethod
     def show_available_metrics(self):
+        """Prints the available metrics and their descriptions."""
         for metric in _metric_name_to_func:
             metric_doc = _metric_name_to_func[metric].__doc__.split("\n")[0]
             logger.info(f"{metric} : {metric_doc}\n")
@@ -139,6 +160,19 @@ class MetricParameters(SpyglassMixin, dj.Lookup):
 
 @schema
 class MetricCurationParameters(SpyglassMixin, dj.Lookup):
+    """Parameters for automatic curation of spike sorting
+
+    Parameters
+    ----------
+    metric_curation_params_name : str
+        Name of the automatic curation parameters
+    label_params : dict, optional
+        Dictionary of parameters for labeling units
+    merge_params : dict, optional
+        Dictionary of parameters for merging units. May include nn_noise_overlap
+        List[comparison operator: str, threshold: float, labels: List[str]]
+    """
+
     definition = """
     # Parameters for curating a spike sorting based on the metrics.
     metric_curation_param_name: varchar(200)
@@ -154,6 +188,7 @@ class MetricCurationParameters(SpyglassMixin, dj.Lookup):
 
     @classmethod
     def insert_default(cls):
+        """Insert default metric curation parameters."""
         cls.insert(cls.contents, skip_duplicates=True)
 
 
@@ -185,7 +220,7 @@ class MetricCurationSelection(SpyglassMixin, dj.Manual):
             key for the inserted row
         """
         if cls & key:
-            logger.warn("This row has already been inserted.")
+            logger.warning("This row has already been inserted.")
             return (cls & key).fetch1()
         key["metric_curation_id"] = uuid.uuid4()
         cls.insert1(key, skip_duplicates=True)
@@ -202,12 +237,33 @@ class MetricCuration(SpyglassMixin, dj.Computed):
     object_id: varchar(40) # Object ID for the metrics in NWB file
     """
 
+    _use_transaction, _allow_insert = False, True
+
     def make(self, key):
+        """Populate MetricCuration table.
+
+        1. Fetches...
+            - Waveform parameters from WaveformParameters
+            - Metric parameters from MetricParameters
+            - Label and merge parameters from MetricCurationParameters
+            - Sorting ID and curation ID from MetricCurationSelection
+        2. Loads the recording and sorting from CurationV1.
+        3. Optionally whitens the recording with spikeinterface
+        4. Extracts waveforms from the recording based on the sorting.
+        5. Optionally computes quality metrics for the units.
+        6. Applies curation based on the metrics, computing labels and merge
+            groups.
+        7. Saves the waveforms, metrics, labels, and merge groups to an
+            analysis NWB file and inserts into MetricCuration table.
+        """
+
+        AnalysisNwbfile()._creation_times["pre_create_time"] = time()
         # FETCH
         nwb_file_name = (
             SpikeSortingSelection * MetricCurationSelection & key
         ).fetch1("nwb_file_name")
 
+        # TODO: reduce fetch calls on same tables
         waveform_params = (
             WaveformParameters * MetricCurationSelection & key
         ).fetch1("waveform_params")
@@ -237,6 +293,10 @@ class MetricCuration(SpyglassMixin, dj.Computed):
         os.makedirs(waveforms_dir, exist_ok=True)
 
         logger.info("Extracting waveforms...")
+
+        # Extract non-sparse waveforms by default
+        waveform_params.setdefault("sparse", False)
+
         waveforms = si.extract_waveforms(
             recording=recording,
             sorting=sorting,
@@ -274,10 +334,12 @@ class MetricCuration(SpyglassMixin, dj.Computed):
             nwb_file_name,
             key["analysis_file_name"],
         )
+        AnalysisNwbfile().log(key, table=self.full_table_name)
         self.insert1(key)
 
     @classmethod
     def get_waveforms(cls):
+        """Returns waveforms identified by metric curation. Not implemented."""
         return NotImplementedError
 
     @classmethod
@@ -523,12 +585,12 @@ def _write_metric_curation_to_nwb(
     object_id : str
         object_id of the units table in the analysis NWB file
     """
-
-    unit_ids = [int(i) for i in waveforms.sorting.get_unit_ids()]
-
     # create new analysis nwb file
     analysis_nwb_file = AnalysisNwbfile().create(nwb_file_name)
     analysis_nwb_file_abs_path = AnalysisNwbfile.get_abs_path(analysis_nwb_file)
+
+    unit_ids = [int(i) for i in waveforms.sorting.get_unit_ids()]
+
     with pynwb.NWBHDF5IO(
         path=analysis_nwb_file_abs_path,
         mode="a",

@@ -2,17 +2,29 @@ import numpy as np
 import pynwb
 import scipy.signal as signal
 
+from spyglass.common.common_usage import ActivityLog
+
 
 def hilbert_decomp(lfp_band_object, sampling_rate=1):
-    """generates the analytical decomposition of the signals in the lfp_band_object
+    """Generates analytical decomposition of signals in the lfp_band_object
 
-    :param lfp_band_object: bandpass filtered LFP
-    :type lfp_band_object: pynwb electrical series
-    :param sampling_rate: bandpass filtered LFP sampling rate (defaults to 1; only used for instantaneous frequency)
-    :type sampling_rate: int
-    :return: envelope, phase, frequency
-    :rtype: pynwb electrical series objects
+    NOTE: This function is not currently used in the pipeline.
+
+    Parameters
+    ----------
+    lfp_band_object : pynwb.ecephys.ElectricalSeries
+        bandpass filtered LFP
+    sampling_rate : int, optional
+        bandpass filtered LFP sampling rate
+        (defaults to 1; only used for instantaneous frequency)
+
+    Returns
+    -------
+    envelope : pynwb.ecephys.ElectricalSeries
+        envelope of the signal
     """
+    ActivityLog().deprecate_log("common.signal_processing.hilbert_decomp")
+
     analytical_signal = signal.hilbert(lfp_band_object.data, axis=0)
 
     eseries_name = "envelope"

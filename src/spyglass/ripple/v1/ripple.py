@@ -1,8 +1,11 @@
+from typing import List
+
 import datajoint as dj
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import sortingview.views as vv
+from matplotlib.axes import Axes
 from ripple_detection import Karlsson_ripple_detector, Kay_ripple_detector
 from ripple_detection.core import gaussian_smooth, get_envelope
 from scipy.stats import zscore
@@ -29,20 +32,6 @@ RIPPLE_DETECTION_ALGORITHMS = {
 UPSTREAM_ACCEPTED_VERSIONS = ["LFPBandV1"]
 
 
-def interpolate_to_new_time(
-    df, new_time, upsampling_interpolation_method="linear"
-):
-    old_time = df.index
-    new_index = pd.Index(
-        np.unique(np.concatenate((old_time, new_time))), name="time"
-    )
-    return (
-        df.reindex(index=new_index)
-        .interpolate(method=upsampling_interpolation_method)
-        .reindex(index=new_time)
-    )
-
-
 @schema
 class RippleLFPSelection(SpyglassMixin, dj.Manual):
     definition = """
@@ -58,6 +47,7 @@ class RippleLFPSelection(SpyglassMixin, dj.Manual):
 
     @staticmethod
     def validate_key(key):
+        """Validates that the filter_name is a ripple filter"""
         filter_name = (LFPBandV1 & key).fetch1("filter_name")
         if "ripple" not in filter_name.lower():
             raise ValueError("Please use a ripple filter")
@@ -121,6 +111,33 @@ class RippleLFPSelection(SpyglassMixin, dj.Manual):
 
 @schema
 class RippleParameters(SpyglassMixin, dj.Lookup):
+    """Parameters for ripple detection
+
+    Parameters
+    ----------
+    ripple_param_name : str
+        Name of the parameter set
+    ripple_param_dict : dict
+        Dictionary of parameters for ripple detection, including...
+        speed_name : str
+            Name of the speed column in the PositionOutput table
+        ripple_detection_algorithm : str
+            Name of the ripple detection algorithm to use
+        ripple_detection_params : dict
+            Dictionary of parameters for the ripple detection algorithm, which
+            may include...
+            speed_threshold : float
+                Speed threshold for ripple detection (cm/s)
+            minimum_duration : float
+                Minimum duration for ripple detection (sec)
+            zscore_threshold : float
+                Z-score threshold for ripple detection (std)
+            smoothing_sigma : float
+                Smoothing sigma for ripple detection (sec)
+            close_ripple_threshold : float
+                Close ripple threshold for ripple detection (sec)
+    """
+
     definition = """
     ripple_param_name : varchar(80) # a name for this set of parameters
     ----
@@ -144,6 +161,24 @@ class RippleParameters(SpyglassMixin, dj.Lookup):
             {"ripple_param_name": "default", "ripple_param_dict": default_dict},
             skip_duplicates=True,
         )
+        default_dict_trodes = {
+            "speed_name": "speed",
+            "ripple_detection_algorithm": "Kay_ripple_detector",
+            "ripple_detection_params": dict(
+                speed_threshold=4.0,  # cm/s
+                minimum_duration=0.015,  # sec
+                zscore_threshold=2.0,  # std
+                smoothing_sigma=0.004,  # sec
+                close_ripple_threshold=0.0,  # sec
+            ),
+        }
+        self.insert1(
+            {
+                "ripple_param_name": "default_trodes",
+                "ripple_param_dict": default_dict_trodes,
+            },
+            skip_duplicates=True,
+        )
 
 
 @schema
@@ -158,6 +193,17 @@ class RippleTimesV1(SpyglassMixin, dj.Computed):
      """
 
     def make(self, key):
+        """Populate RippleTimesV1 table.
+
+        Fetches...
+            - Nwb file name from LFPBandV1
+            - Parameters for ripple detection from RippleParameters
+            - Ripple LFPs and position info from PositionOutput and LFPBandV1
+        Runs she specified ripple detection algorithm (Karlsson or Kay from
+        ripple_detection package), inserts the results into the analysis nwb
+        file, and inserts the key into the RippleTimesV1 table.
+
+        """
         nwb_file_name = (LFPBandV1 & key).fetch1("nwb_file_name")
 
         logger.info(f"Computing ripple times for: {key}")
@@ -194,15 +240,26 @@ class RippleTimesV1(SpyglassMixin, dj.Computed):
 
         self.insert1(key)
 
-    def fetch1_dataframe(self):
+    def fetch1_dataframe(self) -> pd.DataFrame:
         """Convenience function for returning the marks in a readable format"""
         return self.fetch_dataframe()[0]
 
-    def fetch_dataframe(self):
+    def fetch_dataframe(self) -> List[pd.DataFrame]:
+        """Convenience function for returning all marks in a readable format"""
         return [data["ripple_times"] for data in self.fetch_nwb()]
 
     @staticmethod
-    def get_ripple_lfps_and_position_info(key):
+    def get_ripple_lfps_and_position_info(key) -> tuple:
+        """Return the ripple LFPs and position info for the specified key.
+
+        Fetches...
+            - Ripple parameters from RippleParameters
+            - Electrode keys from RippleLFPSelection
+            - LFP data from LFPBandV1
+            - Position data from PositionOutput merge table
+        Interpolates the position data to the LFP timestamps.
+        """
+        # TODO: Pass parameters from make func, instead of fetching again
         ripple_params = (
             RippleParameters & {"ripple_param_name": key["ripple_param_name"]}
         ).fetch1("ripple_param_dict")
@@ -276,8 +333,9 @@ class RippleTimesV1(SpyglassMixin, dj.Computed):
 
     @staticmethod
     def get_Kay_ripple_consensus_trace(
-        ripple_filtered_lfps, sampling_frequency, smoothing_sigma=0.004
-    ):
+        ripple_filtered_lfps, sampling_frequency, smoothing_sigma: float = 0.004
+    ) -> pd.DataFrame:
+        """Calculate the consensus trace for the ripple filtered LFPs"""
         ripple_consensus_trace = np.full_like(ripple_filtered_lfps, np.nan)
         not_null = np.all(pd.notnull(ripple_filtered_lfps), axis=1)
 
@@ -303,6 +361,7 @@ class RippleTimesV1(SpyglassMixin, dj.Computed):
         relative=True,
         ax=None,
     ):
+        """Plot the consensus trace for a ripple event"""
         ripple_start = ripple_times.loc[ripple_label].start_time
         ripple_end = ripple_times.loc[ripple_label].end_time
         time_slice = slice(ripple_start - offset, ripple_end + offset)
@@ -328,8 +387,14 @@ class RippleTimesV1(SpyglassMixin, dj.Computed):
 
     @staticmethod
     def plot_ripple(
-        lfps, ripple_times, ripple_label=1, offset=0.100, relative=True, ax=None
+        lfps,
+        ripple_times,
+        ripple_label: int = 1,
+        offset: float = 0.100,
+        relative: bool = True,
+        ax: Axes = None,
     ):
+        """Plot the LFPs for a ripple event"""
         lfp_labels = lfps.columns
         n_lfps = len(lfp_labels)
         ripple_start = ripple_times.loc[ripple_label].start_time
@@ -373,7 +438,7 @@ class RippleTimesV1(SpyglassMixin, dj.Computed):
         lfp_offset=1,
         lfp_channel_ind=None,
     ):
-
+        """Generate a FigURL for the ripple detection"""
         ripple_times = self.fetch1_dataframe()
 
         def _add_ripple_times(
@@ -488,3 +553,18 @@ class RippleTimesV1(SpyglassMixin, dj.Computed):
         )
 
         return view.url(label="Ripple Detection")
+
+
+def interpolate_to_new_time(
+    df, new_time, upsampling_interpolation_method="linear"
+):
+    """Upsample a dataframe to a new time index"""
+    old_time = df.index
+    new_index = pd.Index(
+        np.unique(np.concatenate((old_time, new_time))), name="time"
+    )
+    return (
+        df.reindex(index=new_index)
+        .interpolate(method=upsampling_interpolation_method)
+        .reindex(index=new_time)
+    )

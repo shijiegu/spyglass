@@ -29,7 +29,7 @@ schema = dj.schema("sharing_kachery")
 
 
 def kachery_download_file(uri: str, dest: str, kachery_zone_name: str) -> str:
-    """set the kachery resource url and attempt to down load the uri into the destination path"""
+    """Set the kachery resource url and attempt to download."""
     KacheryZone.set_resource_url({"kachery_zone_name": kachery_zone_name})
     return kcl.load_file(uri, dest=dest)
 
@@ -102,6 +102,7 @@ class KacheryZone(SpyglassMixin, dj.Manual):
 
     @staticmethod
     def reset_resource_url():
+        """Resets the KACHERY_RESOURCE_URL to the default value."""
         KacheryZone.reset_zone()
         if default_kachery_resource_url is not None:
             os.environ[kachery_resource_url_envar] = (
@@ -134,6 +135,7 @@ class AnalysisNwbfileKachery(SpyglassMixin, dj.Computed):
         """
 
     def make(self, key):
+        """Populate with the uri of the analysis file"""
         # note that we're assuming that the user has initialized a kachery-cloud
         # client with kachery-cloud-init. Uncomment the line below once we are
         # sharing linked files as well.
@@ -163,7 +165,9 @@ class AnalysisNwbfileKachery(SpyglassMixin, dj.Computed):
         KacheryZone.reset_zone()
 
     @staticmethod
-    def download_file(analysis_file_name: str) -> bool:
+    def download_file(
+        analysis_file_name: str, permit_fail: bool = False
+    ) -> bool:
         """Download the specified analysis file and associated linked files
         from kachery-cloud if possible
 
@@ -211,10 +215,10 @@ class AnalysisNwbfileKachery(SpyglassMixin, dj.Computed):
                         raise Exception(
                             f"Linked file {linked_file_path} cannot be downloaded"
                         )
-        if not downloaded:
+        if not downloaded and not permit_fail:
             raise Exception(f"{analysis_file_name} cannot be downloaded")
 
-        return True
+        return downloaded
 
 
 def share_data_to_kachery(

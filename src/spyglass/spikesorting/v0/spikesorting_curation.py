@@ -10,9 +10,17 @@ from typing import List
 import datajoint as dj
 import numpy as np
 import spikeinterface as si
+from packaging import version
+
+if version.parse(si.__version__) < version.parse("0.99.1"):
+    raise ImportError(
+        "SpikeInterface version must updated. "
+        + "Please run `pip install spikeinterface==0.99.1` to update."
+    )
 import spikeinterface.preprocessing as sip
 import spikeinterface.qualitymetrics as sq
 
+from spyglass.common import BrainRegion, Electrode
 from spyglass.common.common_interval import IntervalList
 from spyglass.common.common_nwbfile import AnalysisNwbfile
 from spyglass.settings import waveforms_dir
@@ -25,6 +33,7 @@ from spyglass.spikesorting.v0.spikesorting_recording import (
 )
 from spyglass.utils import SpyglassMixin, logger
 
+from .spikesorting_recording import SortGroup
 from .spikesorting_sorting import SpikeSorting
 
 schema = dj.schema("spikesorting_curation")
@@ -35,6 +44,7 @@ valid_labels = ["reject", "noise", "artifact", "mua", "accept"]
 def apply_merge_groups_to_sorting(
     sorting: si.BaseSorting, merge_groups: List[List[int]]
 ):
+    """Apply merge groups to a sorting extractor."""
     # return a new sorting where the units are merged according to merge_groups
     # merge_groups is a list of lists of unit_ids.
     # for example: merge_groups = [[1, 2], [5, 8, 4]]]
@@ -121,20 +131,25 @@ class Curation(SpyglassMixin, dj.Manual):
         # convert unit_ids in labels to integers for labels from sortingview.
         new_labels = {int(unit_id): labels[unit_id] for unit_id in labels}
 
-        sorting_key["curation_id"] = curation_id
-        sorting_key["parent_curation_id"] = parent_curation_id
-        sorting_key["description"] = description
-        sorting_key["curation_labels"] = new_labels
-        sorting_key["merge_groups"] = merge_groups
-        sorting_key["quality_metrics"] = metrics
-        sorting_key["time_of_creation"] = int(time.time())
+        sorting_key.update(
+            {
+                "curation_id": curation_id,
+                "parent_curation_id": parent_curation_id,
+                "description": description,
+                "curation_labels": new_labels,
+                "merge_groups": merge_groups,
+                "quality_metrics": metrics,
+                "time_of_creation": int(time.time()),
+            }
+        )
 
         # mike: added skip duplicates
         Curation.insert1(sorting_key, skip_duplicates=True)
 
         # get the primary key for this curation
-        c_key = Curation.fetch("KEY")[0]
-        curation_key = {item: sorting_key[item] for item in c_key}
+        curation_key = {
+            item: sorting_key[item] for item in Curation.primary_key
+        }
 
         return curation_key
 
@@ -220,6 +235,7 @@ class Curation(SpyglassMixin, dj.Manual):
         units_object_id : str
 
         """
+        analysis_file_name = AnalysisNwbfile().create(key["nwb_file_name"])
 
         sort_interval_valid_times = (
             IntervalList & {"interval_list_name": sort_interval_list_name}
@@ -240,7 +256,6 @@ class Curation(SpyglassMixin, dj.Manual):
             units_valid_times[unit_id] = sort_interval_valid_times
             units_sort_interval[unit_id] = [sort_interval]
 
-        analysis_file_name = AnalysisNwbfile().create(key["nwb_file_name"])
         object_ids = AnalysisNwbfile().add_units(
             analysis_file_name,
             units,
@@ -252,7 +267,7 @@ class Curation(SpyglassMixin, dj.Manual):
         AnalysisNwbfile().add(key["nwb_file_name"], analysis_file_name)
 
         if object_ids == "":
-            logger.warn(
+            logger.warning(
                 "Sorting contains no units."
                 "Created an empty analysis nwb file anyway."
             )
@@ -265,6 +280,28 @@ class Curation(SpyglassMixin, dj.Manual):
 
 @schema
 class WaveformParameters(SpyglassMixin, dj.Manual):
+    """Parameters for extracting waveforms from a sorting extractor
+
+    Parameters
+    ----------
+    waveform_params_name : str
+        Name of the waveform extraction parameters
+    waveform_params : dict
+        Dictionary of waveform extraction parameters, including...
+        ms_before : float
+            Number of milliseconds before the spike time to include
+        ms_after : float
+            Number of milliseconds after the spike time to include
+        max_spikes_per_unit : int
+            Maximum number of spikes to extract for each unit
+        n_jobs : int
+            Number of parallel jobs to use for extraction
+        total_memory : str
+            Total memory to use for extraction (e.g. "5G")
+        whiten : bool
+            Whether to whiten the waveforms or not
+    """
+
     definition = """
     waveform_params_name: varchar(80) # name of waveform extraction parameters
     ---
@@ -272,29 +309,20 @@ class WaveformParameters(SpyglassMixin, dj.Manual):
     """
 
     def insert_default(self):
-        waveform_params_name = "default_not_whitened"
-        waveform_params = {
+        """Inserts default waveform parameters"""
+        default = {
             "ms_before": 0.5,
             "ms_after": 0.5,
             "max_spikes_per_unit": 5000,
             "n_jobs": 5,
             "total_memory": "5G",
-            "whiten": False,
         }
-        self.insert1(
-            [waveform_params_name, waveform_params], skip_duplicates=True
-        )
-        waveform_params_name = "default_whitened"
-        waveform_params = {
-            "ms_before": 0.5,
-            "ms_after": 0.5,
-            "max_spikes_per_unit": 5000,
-            "n_jobs": 5,
-            "total_memory": "5G",
-            "whiten": True,
-        }
-        self.insert1(
-            [waveform_params_name, waveform_params], skip_duplicates=True
+        self.insert(
+            (
+                ["default_whitened", dict(**default, whiten=True)],
+                ["default_not_whitened", dict(**default, whiten=False)],
+            ),
+            skip_duplicates=True,
         )
 
 
@@ -309,6 +337,8 @@ class WaveformSelection(SpyglassMixin, dj.Manual):
 
 @schema
 class Waveforms(SpyglassMixin, dj.Computed):
+    _use_transaction, _allow_insert = False, True
+
     definition = """
     -> WaveformSelection
     ---
@@ -318,6 +348,18 @@ class Waveforms(SpyglassMixin, dj.Computed):
     """
 
     def make(self, key):
+        """Populate Waveforms table with waveform extraction results
+
+        1. Fetches ...
+            - Recording and sorting from Curation table
+            - Parameters from WaveformParameters table
+        2. Uses spikeinterface to extract waveforms
+        3. Generates an analysis NWB file with the waveforms
+        4. Inserts the key into Waveforms table
+        """
+        key["analysis_file_name"] = AnalysisNwbfile().create(  # logged
+            key["nwb_file_name"]
+        )
         recording = Curation.get_recording(key)
         if recording.get_num_segments() > 1:
             recording = si.concatenate_recordings([recording])
@@ -343,15 +385,13 @@ class Waveforms(SpyglassMixin, dj.Computed):
             **waveform_params,
         )
 
-        key["analysis_file_name"] = AnalysisNwbfile().create(
-            key["nwb_file_name"]
-        )
         object_id = AnalysisNwbfile().add_units_waveforms(
             key["analysis_file_name"], waveform_extractor=waveforms
         )
         key["waveforms_object_id"] = object_id
         AnalysisNwbfile().add(key["nwb_file_name"], key["analysis_file_name"])
 
+        AnalysisNwbfile().log(key, table=self.full_table_name)
         self.insert1(key)
 
     def load_waveforms(self, key: dict):
@@ -372,6 +412,7 @@ class Waveforms(SpyglassMixin, dj.Computed):
         return we
 
     def fetch_nwb(self, key):
+        """Fetches the NWB file path for the waveforms. NOT YET IMPLEMENTED."""
         # TODO: implement fetching waveforms from NWB
         return NotImplementedError
 
@@ -388,6 +429,11 @@ class Waveforms(SpyglassMixin, dj.Computed):
 
 @schema
 class MetricParameters(SpyglassMixin, dj.Manual):
+    """Parameters for computing quality metrics of sorted units
+
+    See MetricParameters.get_available_metrics() for a list of available metrics
+    """
+
     definition = """
     # Parameters for computing quality metrics of sorted units
     metric_params_name: varchar(64)
@@ -441,13 +487,15 @@ class MetricParameters(SpyglassMixin, dj.Manual):
         "Returns default params for the given metric"
         return self.metric_default_params(metric)
 
-    def insert_default(self):
+    def insert_default(self) -> None:
+        """Inserts default metric parameters"""
         self.insert1(
             ["franklab_default3", self.metric_default_params],
             skip_duplicates=True,
         )
 
     def get_available_metrics(self):
+        """Log available metrics and their descriptions"""
         for metric in _metric_name_to_func:
             if metric in self.available_metrics:
                 metric_doc = _metric_name_to_func[metric].__doc__.split("\n")[0]
@@ -458,7 +506,7 @@ class MetricParameters(SpyglassMixin, dj.Manual):
 
     # TODO
     def _validate_metrics_list(self, key):
-        """Checks whether a row to be inserted contains only the available metrics"""
+        """Checks whether a row to be inserted contains only available metrics"""
         # get available metrics list
         # get metric list from key
         # compare
@@ -470,10 +518,10 @@ class MetricSelection(SpyglassMixin, dj.Manual):
     definition = """
     -> Waveforms
     -> MetricParameters
-    ---
     """
 
     def insert1(self, key, **kwargs):
+        """Overriding insert1 to add warnings for peak_offset and peak_channel"""
         waveform_params = (WaveformParameters & key).fetch1("waveform_params")
         metric_params = (MetricParameters & key).fetch1("metric_params")
         if "peak_offset" in metric_params:
@@ -495,6 +543,8 @@ class MetricSelection(SpyglassMixin, dj.Manual):
 
 @schema
 class QualityMetrics(SpyglassMixin, dj.Computed):
+    _use_transaction, _allow_insert = False, True
+
     definition = """
     -> MetricSelection
     ---
@@ -504,7 +554,23 @@ class QualityMetrics(SpyglassMixin, dj.Computed):
     """
 
     def make(self, key):
+        """Populate QualityMetrics table with quality metric results.
+
+        1. Fetches ...
+            - Waveform extractor from Waveforms table
+            - Parameters from MetricParameters table
+        2. Computes metrics, including SNR, ISI violation, NN isolation,
+            NN noise overlap, peak offset, peak channel, and number of spikes.
+        3. Generates an analysis NWB file with the metrics.
+        4. Inserts the key into QualityMetrics table
+        """
+        analysis_file_name = AnalysisNwbfile().create(  # logged
+            key["nwb_file_name"]
+        )
         waveform_extractor = Waveforms().load_waveforms(key)
+        key["analysis_file_name"] = (
+            analysis_file_name  # add to key here to prevent fetch errors
+        )
         qm = {}
         params = (MetricParameters & key).fetch1("metric_params")
         for metric_name, metric_params in params.items():
@@ -520,13 +586,11 @@ class QualityMetrics(SpyglassMixin, dj.Computed):
         logger.info(f"Computed all metrics: {qm}")
         self._dump_to_json(qm, key["quality_metrics_path"])
 
-        key["analysis_file_name"] = AnalysisNwbfile().create(
-            key["nwb_file_name"]
-        )
         key["object_id"] = AnalysisNwbfile().add_units_metrics(
             key["analysis_file_name"], metrics=qm
         )
         AnalysisNwbfile().add(key["nwb_file_name"], key["analysis_file_name"])
+        AnalysisNwbfile().log(key, table=self.full_table_name)
 
         self.insert1(key)
 
@@ -536,46 +600,50 @@ class QualityMetrics(SpyglassMixin, dj.Computed):
         return qm_name
 
     def _compute_metric(self, waveform_extractor, metric_name, **metric_params):
-        peak_sign_metrics = ["snr", "peak_offset", "peak_channel"]
         metric_func = _metric_name_to_func[metric_name]
-        # TODO clean up code below
+
+        peak_sign_metrics = ["snr", "peak_offset", "peak_channel"]
         if metric_name == "isi_violation":
-            metric = metric_func(waveform_extractor, **metric_params)
+            return metric_func(waveform_extractor, **metric_params)
         elif metric_name in peak_sign_metrics:
-            if "peak_sign" in metric_params:
-                metric = metric_func(
-                    waveform_extractor,
-                    peak_sign=metric_params.pop("peak_sign"),
-                    **metric_params,
-                )
-            else:
+            if "peak_sign" not in metric_params:
                 raise Exception(
                     f"{peak_sign_metrics} metrics require peak_sign",
                     "to be defined in the metric parameters",
                 )
-        else:
-            metric = {}
-            num_spikes = sq.compute_num_spikes(waveform_extractor)
-            for unit_id in waveform_extractor.sorting.get_unit_ids():
-                # checks to avoid bug in spikeinterface 0.98.2
-                if metric_name == "nn_isolation" and num_spikes[
-                    unit_id
-                ] < metric_params.get("min_spikes", 10):
+            return metric_func(
+                waveform_extractor,
+                peak_sign=metric_params.pop("peak_sign"),
+                **metric_params,
+            )
+
+        metric = {}
+        num_spikes = sq.compute_num_spikes(waveform_extractor)
+
+        is_nn_iso = metric_name == "nn_isolation"
+        is_nn_overlap = metric_name == "nn_noise_overlap"
+        min_spikes = metric_params.get("min_spikes", 10)
+
+        for unit_id in waveform_extractor.sorting.get_unit_ids():
+            # checks to avoid bug in spikeinterface 0.98.2
+            if num_spikes[unit_id] < min_spikes and (
+                is_nn_iso or is_nn_overlap
+            ):
+                if is_nn_iso:
                     metric[str(unit_id)] = (np.nan, np.nan)
-                elif metric_name == "nn_noise_overlap" and num_spikes[
-                    unit_id
-                ] < metric_params.get("min_spikes", 10):
+                elif is_nn_overlap:
                     metric[str(unit_id)] = np.nan
 
-                else:
-                    metric[str(unit_id)] = metric_func(
-                        waveform_extractor,
-                        this_unit_id=int(unit_id),
-                        **metric_params,
-                    )
-                # nn_isolation returns tuple with isolation and unit number. We only want isolation.
-                if metric_name == "nn_isolation":
-                    metric[str(unit_id)] = metric[str(unit_id)][0]
+            else:
+                metric[str(unit_id)] = metric_func(
+                    waveform_extractor,
+                    this_unit_id=int(unit_id),
+                    **metric_params,
+                )
+            # nn_isolation returns tuple with isolation and unit number.
+            # We only want isolation.
+            if is_nn_iso:
+                metric[str(unit_id)] = metric[str(unit_id)][0]
         return metric
 
     def _dump_to_json(self, qm_dict, save_path):
@@ -618,12 +686,10 @@ def _get_peak_offset(
     """Computes the shift of the waveform peak from center of window."""
     if "peak_sign" in metric_params:
         del metric_params["peak_sign"]
-    peak_offset_inds = (
-        si.postprocessing.get_template_extremum_channel_peak_shift(
-            waveform_extractor=waveform_extractor,
-            peak_sign=peak_sign,
-            **metric_params,
-        )
+    peak_offset_inds = si.core.get_template_extremum_channel_peak_shift(
+        waveform_extractor=waveform_extractor,
+        peak_sign=peak_sign,
+        **metric_params,
     )
     peak_offset = {key: int(abs(val)) for key, val in peak_offset_inds.items()}
     return peak_offset
@@ -635,7 +701,7 @@ def _get_peak_channel(
     """Computes the electrode_id of the channel with the extremum peak for each unit."""
     if "peak_sign" in metric_params:
         del metric_params["peak_sign"]
-    peak_channel_dict = si.postprocessing.get_template_extremum_channel(
+    peak_channel_dict = si.core.get_template_extremum_channel(
         waveform_extractor=waveform_extractor,
         peak_sign=peak_sign,
         **metric_params,
@@ -666,6 +732,19 @@ _metric_name_to_func = {
 
 @schema
 class AutomaticCurationParameters(SpyglassMixin, dj.Manual):
+    """Parameters for automatic curation of spike sorting
+
+    Parameters
+    ----------
+    auto_curation_params_name : str
+        Name of the automatic curation parameters
+    merge_params : dict, optional
+        Dictionary of parameters for merging units. May include nn_noise_overlap
+        List[comparison operator: str, threshold: float, labels: List[str]]
+    label_params : dict, optional
+        Dictionary of parameters for labeling units
+    """
+
     definition = """
     auto_curation_params_name: varchar(36)   # name of this parameter set
     ---
@@ -676,6 +755,7 @@ class AutomaticCurationParameters(SpyglassMixin, dj.Manual):
     # NOTE: No existing entries impacted by this change
 
     def insert1(self, key, **kwargs):
+        """Overriding insert1 to validats label_params and merge_params"""
         # validate the labels and then insert
         # TODO: add validation for merge_params
         for metric in key["label_params"]:
@@ -701,6 +781,7 @@ class AutomaticCurationParameters(SpyglassMixin, dj.Manual):
         super().insert1(key, **kwargs)
 
     def insert_default(self):
+        """Inserts default automatic curation parameters"""
         # label_params parsing: Each key is the name of a metric,
         # the contents are a three value list with the comparison, a value,
         # and a list of labels to apply if the comparison is true
@@ -749,6 +830,15 @@ class AutomaticCuration(SpyglassMixin, dj.Computed):
     """
 
     def make(self, key):
+        """Populate AutomaticCuration table with automatic curation results.
+
+        1. Fetches ...
+            - Quality metrics from QualityMetrics table
+            - Parameters from AutomaticCurationParameters table
+            - Parent curation/sorting from Curation table
+        2. Curates the sorting based on provided merge and label parameters
+        3. Inserts IDs into  AutomaticCuration and Curation tables
+        """
         metrics_path = (QualityMetrics & key).fetch1("quality_metrics_path")
         with open(metrics_path) as f:
             quality_metrics = json.load(f)
@@ -861,31 +951,31 @@ class AutomaticCuration(SpyglassMixin, dj.Computed):
         # 2. Append labels to current labels, checking for inconsistencies
         if not label_params:
             return parent_labels
-        else:
-            for metric in label_params:
-                if metric not in quality_metrics:
-                    Warning(f"{metric} not found in quality metrics; skipping")
-                else:
-                    compare = _comparison_to_function[label_params[metric][0]]
 
-                    for unit_id in quality_metrics[metric].keys():
-                        # compare the quality metric to the threshold with the specified operator
-                        # note that label_params[metric] is a three element list with a comparison operator as a string,
-                        # the threshold value, and a list of labels to be applied if the comparison is true
-                        if compare(
-                            quality_metrics[metric][unit_id],
-                            label_params[metric][1],
-                        ):
-                            if unit_id not in parent_labels:
-                                parent_labels[unit_id] = label_params[metric][2]
-                            # check if the label is already there, and if not, add it
-                            elif (
-                                label_params[metric][2]
-                                not in parent_labels[unit_id]
-                            ):
-                                parent_labels[unit_id].extend(
-                                    label_params[metric][2]
-                                )
+        for metric in label_params:
+            if metric not in quality_metrics:
+                Warning(f"{metric} not found in quality metrics; skipping")
+                continue
+
+            compare = _comparison_to_function[label_params[metric][0]]
+
+            for unit_id in quality_metrics[metric]:
+
+                # compare the quality metric to the threshold with the
+                # specified operator note that label_params[metric] is a three
+                # element list with a comparison operator as a string, the
+                # threshold value, and a list of labels to be applied if the
+                # comparison is true
+
+                label = label_params[metric]
+
+                if compare(quality_metrics[metric][unit_id], label[1]):
+                    if unit_id not in parent_labels:
+                        parent_labels[unit_id] = label[2]
+                    # check if the label is already there, and if not, add it
+                    elif label[2] not in parent_labels[unit_id]:
+                        parent_labels[unit_id].extend(label[2])
+
             return parent_labels
 
 
@@ -904,6 +994,7 @@ class CuratedSpikeSorting(SpyglassMixin, dj.Computed):
     -> AnalysisNwbfile
     units_object_id: varchar(40)
     """
+    _use_transaction, _allow_insert = False, True
 
     class Unit(SpyglassMixin, dj.Part):
         definition = """
@@ -922,17 +1013,27 @@ class CuratedSpikeSorting(SpyglassMixin, dj.Computed):
         """
 
     def make(self, key):
+        """Populate CuratedSpikeSorting table with curated sorting results.
+
+        1. Fetches metrics and sorting from the Curation table
+        2. Saves the sorting in an analysis NWB file
+        3. Inserts key into CuratedSpikeSorting table and units into part table.
+        """
+        AnalysisNwbfile()._creation_times["pre_create_time"] = time.time()
         unit_labels_to_remove = ["reject"]
         # check that the Curation has metrics
         metrics = (Curation & key).fetch1("quality_metrics")
         if metrics == {}:
-            Warning(
-                f"Metrics for Curation {key} should normally be calculated before insertion here"
+            logger.warning(
+                f"Metrics for Curation {key} should normally be calculated "
+                + "before insertion here"
             )
 
         sorting = Curation.get_curated_sorting(key)
         unit_ids = sorting.get_unit_ids()
-        # Get the labels for the units, add only those units that do not have 'reject' or 'noise' labels
+
+        # Get the labels for the units, add only those units that do not have
+        # 'reject' or 'noise' labels
         unit_labels = (Curation & key).fetch1("curation_labels")
         accepted_units = []
         for unit_id in unit_ids:
@@ -988,6 +1089,8 @@ class CuratedSpikeSorting(SpyglassMixin, dj.Computed):
             unit_ids=accepted_units,
             labels=labels,
         )
+
+        AnalysisNwbfile().log(key, table=self.full_table_name)
         self.insert1(key)
 
         # now add the units
@@ -1005,7 +1108,8 @@ class CuratedSpikeSorting(SpyglassMixin, dj.Computed):
                     key[field] = final_metrics[field][unit_id]
                 else:
                     Warning(
-                        f"No metric named {field} in computed unit quality metrics; skipping"
+                        f"No metric named {field} in computed unit quality "
+                        + "metrics; skipping"
                     )
             CuratedSpikeSorting.Unit.insert1(key)
 
@@ -1030,97 +1134,35 @@ class CuratedSpikeSorting(SpyglassMixin, dj.Computed):
         sorting_key = (cls & key).fetch1("KEY")
         return Curation.get_curated_sorting(sorting_key)
 
-
-@schema
-class UnitInclusionParameters(SpyglassMixin, dj.Manual):
-    definition = """
-    unit_inclusion_param_name: varchar(80) # the name of the list of thresholds for unit inclusion
-    ---
-    inclusion_param_dict: blob # the dictionary of inclusion / exclusion parameters
-    """
-
-    def insert1(self, key, **kwargs):
-        # check to see that the dictionary fits the specifications
-        # The inclusion parameter dict has the following form:
-        # param_dict['metric_name'] = (operator, value)
-        #    where operator is '<', '>', <=', '>=', or '==' and value is the comparison (float) value to be used ()
-        # param_dict['exclude_labels'] = [list of labels to exclude]
-        pdict = key["inclusion_param_dict"]
-        metrics_list = CuratedSpikeSorting().metrics_fields()
-
-        for k in pdict:
-            if k not in metrics_list and k != "exclude_labels":
-                raise Exception(
-                    f"key {k} is not a valid element of the inclusion_param_dict"
-                )
-            if k in metrics_list:
-                if pdict[k][0] not in _comparison_to_function:
-                    raise Exception(
-                        f"operator {pdict[k][0]} for metric {k} is not in the valid operators list: {_comparison_to_function.keys()}"
-                    )
-            if k == "exclude_labels":
-                for label in pdict[k]:
-                    if label not in valid_labels:
-                        raise Exception(
-                            f"exclude label {label} is not in the valid_labels list: {valid_labels}"
-                        )
-        super().insert1(key, **kwargs)
-
-    def get_included_units(
-        self, curated_sorting_key, unit_inclusion_param_name
-    ):
-        """Given a reference to a set of curated sorting units and the name of
-        a unit inclusion parameter list, returns unit key
+    @classmethod
+    def get_sort_group_info(cls, key):
+        """Returns the sort group information for the curation
+        (e.g. brain region, electrode placement, etc.)
 
         Parameters
         ----------
-        curated_sorting_key : dict
-            key to select a set of curated sorting
-        unit_inclusion_param_name : str
-            name of a unit inclusion parameter entry
+        key : dict
+            restriction on CuratedSpikeSorting table
 
         Returns
         -------
-        dict
-            key to select all of the included units
+        sort_group_info : Table
+            Table with information about the sort groups
         """
-        curated_sortings = (CuratedSpikeSorting() & curated_sorting_key).fetch()
-        inc_param_dict = (
-            UnitInclusionParameters
-            & {"unit_inclusion_param_name": unit_inclusion_param_name}
-        ).fetch1("inclusion_param_dict")
-        units = (CuratedSpikeSorting().Unit() & curated_sortings).fetch()
-        units_key = (CuratedSpikeSorting().Unit() & curated_sortings).fetch(
-            "KEY"
-        )
-        # get the list of labels to exclude if there is one
-        if "exclude_labels" in inc_param_dict:
-            exclude_labels = inc_param_dict["exclude_labels"]
-            del inc_param_dict["exclude_labels"]
-        else:
-            exclude_labels = []
+        table = cls & key
 
-        # create a list of the units to kepp.
-        keep = np.asarray([True] * len(units))
-        for metric in inc_param_dict:
-            # for all units, go through each metric, compare it to the value
-            # specified, and update the list to be kept
-            keep = np.logical_and(
-                keep,
-                _comparison_to_function[inc_param_dict[metric][0]](
-                    units[metric], inc_param_dict[metric][1]
-                ),
+        electrode_restrict_list = []
+        for entry in table:
+            # Just take one electrode entry per sort group
+            electrode_restrict_list.extend(
+                ((SortGroup.SortGroupElectrode() & entry) * Electrode).fetch(
+                    limit=1
+                )
             )
-
-        # now exclude by label if it is specified
-        if len(exclude_labels):
-            for unit_ind in np.ravel(np.argwhere(keep)):
-                labels = units[unit_ind]["label"].split(",")
-                for label in labels:
-                    if label in exclude_labels:
-                        keep[unit_ind] = False
-                        break
-
-        # return units that passed all of the tests
-        # TODO: Make this more efficient
-        return {i: units_key[i] for i in np.ravel(np.argwhere(keep))}
+        # Run joins with the tables with info and return
+        sort_group_info = (
+            (Electrode & electrode_restrict_list)
+            * table
+            * SortGroup.SortGroupElectrode()
+        ) * BrainRegion()
+        return sort_group_info

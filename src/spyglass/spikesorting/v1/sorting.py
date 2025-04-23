@@ -1,3 +1,4 @@
+import os
 import tempfile
 import time
 import uuid
@@ -28,6 +29,60 @@ schema = dj.schema("spikesorting_v1_sorting")
 
 @schema
 class SpikeSorterParameters(SpyglassMixin, dj.Lookup):
+    """Parameters for spike sorting algorithms.
+
+    Parameters
+    ----------
+    sorter: str
+        Name of the spike sorting algorithm.
+    sorter_params_name: str
+        Name of the parameter set for the spike sorting algorithm.
+    sorter_params: dict
+        Dictionary of parameters for the spike sorting algorithm.
+        The keys and values depend on the specific algorithm being used.
+        For example, for the "mountainsort4" algorithm, the parameters are...
+            detect_sign: int
+                Sign of the detected spikes. 1 for positive, -1 for negative.
+            adjacency_radius: int
+                Radius for adjacency graph. Determines which channels are
+                considered neighbors.
+            freq_min: int
+                Minimum frequency for bandpass filter.
+            freq_max: int
+                Maximum frequency for bandpass filter.
+            filter: bool
+                Whether to apply bandpass filter.
+            whiten: bool
+                Whether to whiten the data.
+            num_workers: int
+                Number of workers to use for parallel processing.
+            clip_size: int
+                Size of the clips to extract for spike detection.
+            detect_threshold: float
+                Threshold for spike detection.
+            detect_interval: int
+                Minimum interval between detected spikes.
+        For the "clusterless_thresholder" algorithm, the parameters are...
+            detect_threshold: float
+                microvolt detection threshold for spike detection.
+            method: str
+                Method for spike detection. Options are "locally_exclusive" or
+                "global".
+            peak_sign: enum ("neg", "pos")
+                Sign of the detected peaks.
+            exclude_sweep_ms: float
+                Exclusion time in milliseconds for detected spikes.
+            local_radius_um: int
+                Local radius in micrometers for spike detection.
+            noise_levels: np.ndarray
+                Noise levels for spike detection.
+            random_chunk_kwargs: dict
+                Additional arguments for random chunk processing.
+            outputs: str
+                Output type for spike detection. Options are "sorting" or
+                "labels".
+    """
+
     definition = """
     # Spike sorting algorithm and associated parameters.
     sorter: varchar(200)
@@ -35,38 +90,26 @@ class SpikeSorterParameters(SpyglassMixin, dj.Lookup):
     ---
     sorter_params: blob
     """
+    mountain_default = {
+        "detect_sign": -1,
+        "adjacency_radius": 100,
+        "filter": False,
+        "whiten": True,
+        "num_workers": 1,
+        "clip_size": 40,
+        "detect_threshold": 3,
+        "detect_interval": 10,
+    }
     contents = [
         [
             "mountainsort4",
             "franklab_tetrode_hippocampus_30KHz",
-            {
-                "detect_sign": -1,
-                "adjacency_radius": 100,
-                "freq_min": 600,
-                "freq_max": 6000,
-                "filter": False,
-                "whiten": True,
-                "num_workers": 1,
-                "clip_size": 40,
-                "detect_threshold": 3,
-                "detect_interval": 10,
-            },
+            {**mountain_default, "freq_min": 600, "freq_max": 6000},
         ],
         [
             "mountainsort4",
             "franklab_probe_ctx_30KHz",
-            {
-                "detect_sign": -1,
-                "adjacency_radius": 100,
-                "freq_min": 300,
-                "freq_max": 6000,
-                "filter": False,
-                "whiten": True,
-                "num_workers": 1,
-                "clip_size": 40,
-                "detect_threshold": 3,
-                "detect_interval": 10,
-            },
+            {**mountain_default, "freq_min": 300, "freq_max": 6000},
         ],
         [
             "clusterless_thresholder",
@@ -95,13 +138,14 @@ class SpikeSorterParameters(SpyglassMixin, dj.Lookup):
 
     @classmethod
     def insert_default(cls):
+        """Insert default sorter parameters into SpikeSorterParameters table."""
         cls.insert(cls.contents, skip_duplicates=True)
 
 
 @schema
 class SpikeSortingSelection(SpyglassMixin, dj.Manual):
     definition = """
-    # Processed recording and spike sorting parameters. Use `insert_selection` method to insert rows.
+    # Processed recording and spike sorting parameters. See `insert_selection`.
     sorting_id: uuid
     ---
     -> SpikeSortingRecording
@@ -143,6 +187,8 @@ class SpikeSorting(SpyglassMixin, dj.Computed):
     time_of_sort: int               # in Unix time, to the nearest second
     """
 
+    _use_transaction, _allow_insert = False, True
+
     def make(self, key: dict):
         """Runs spike sorting on the data and parameters specified by the
         SpikeSortingSelection table and inserts a new entry to SpikeSorting table.
@@ -151,6 +197,8 @@ class SpikeSorting(SpyglassMixin, dj.Computed):
         # - information about the recording
         # - artifact free intervals
         # - spike sorter and sorter params
+        AnalysisNwbfile()._creation_times["pre_create_time"] = time.time()
+
         recording_key = (
             SpikeSortingRecording * SpikeSortingSelection & key
         ).fetch1()
@@ -168,15 +216,15 @@ class SpikeSorting(SpyglassMixin, dj.Computed):
         sorter, sorter_params = (
             SpikeSorterParameters * SpikeSortingSelection & key
         ).fetch1("sorter", "sorter_params")
+        recording_analysis_nwb_file_abs_path = AnalysisNwbfile.get_abs_path(
+            recording_key["analysis_file_name"]
+        )
 
         # DO:
         # - load recording
         # - concatenate artifact removed intervals
         # - run spike sorting
         # - save output to NWB file
-        recording_analysis_nwb_file_abs_path = AnalysisNwbfile.get_abs_path(
-            recording_key["analysis_file_name"]
-        )
         recording = se.read_nwb_recording(
             recording_analysis_nwb_file_abs_path, load_time_vector=True
         )
@@ -197,7 +245,7 @@ class SpikeSorting(SpyglassMixin, dj.Computed):
             list_triggers = []
             if artifact_removed_intervals_ind[0][0] > 0:
                 list_triggers.append(
-                    np.array([0, artifact_removed_intervals_ind[0][0]])
+                    np.arange(0, artifact_removed_intervals_ind[0][0])
                 )
             for interval_ind in range(len(artifact_removed_intervals_ind) - 1):
                 list_triggers.append(
@@ -208,11 +256,9 @@ class SpikeSorting(SpyglassMixin, dj.Computed):
                 )
             if artifact_removed_intervals_ind[-1][1] < len(timestamps):
                 list_triggers.append(
-                    np.array(
-                        [
-                            artifact_removed_intervals_ind[-1][1],
-                            len(timestamps) - 1,
-                        ]
+                    np.arange(
+                        artifact_removed_intervals_ind[-1][1],
+                        len(timestamps) - 1,
                     )
                 )
 
@@ -230,30 +276,57 @@ class SpikeSorting(SpyglassMixin, dj.Computed):
             sorter_params.pop("tempdir", None)
             sorter_params.pop("whiten", None)
             sorter_params.pop("outputs", None)
+            if "local_radius_um" in sorter_params:
+                sorter_params["radius_um"] = sorter_params.pop(
+                    "local_radius_um"
+                )  # correct existing parameter sets for spikeinterface>=0.99.1
 
             # Detect peaks for clusterless decoding
             detected_spikes = detect_peaks(recording, **sorter_params)
             sorting = si.NumpySorting.from_times_labels(
                 times_list=detected_spikes["sample_index"],
-                labels_list=np.zeros(len(detected_spikes), dtype=np.int),
+                labels_list=np.zeros(len(detected_spikes), dtype=np.int32),
                 sampling_frequency=recording.get_sampling_frequency(),
             )
         else:
             # Specify tempdir (expected by some sorters like mountainsort4)
             sorter_temp_dir = tempfile.TemporaryDirectory(dir=temp_dir)
             sorter_params["tempdir"] = sorter_temp_dir.name
+            os.chmod(sorter_params["tempdir"], 0o777)
+
+            if sorter == "mountainsort5":
+                _ = sorter_params.pop("tempdir", None)
+
             # if whitening is specified in sorter params, apply whitening separately
             # prior to sorting and turn off "sorter whitening"
-            if sorter_params["whiten"]:
+            if sorter_params.get("whiten", False):
                 recording = sip.whiten(recording, dtype=np.float64)
                 sorter_params["whiten"] = False
-            sorting = sis.run_sorter(
-                sorter,
-                recording,
-                output_folder=sorter_temp_dir.name,
-                remove_existing_folder=True,
-                **sorter_params,
-            )
+
+            common_sorter_items = {
+                "sorter_name": sorter,
+                "recording": recording,
+                "output_folder": sorter_temp_dir.name,
+                "remove_existing_folder": True,
+            }
+
+            if sorter.lower() in ["kilosort2_5", "kilosort3", "ironclust"]:
+                sorter_params = {
+                    k: v
+                    for k, v in sorter_params.items()
+                    if k
+                    not in ["tempdir", "mp_context", "max_threads_per_process"]
+                }
+                sorting = sis.run_sorter(
+                    **common_sorter_items,
+                    singularity_image=True,
+                    **sorter_params,
+                )
+            else:
+                sorting = sis.run_sorter(
+                    **common_sorter_items,
+                    **sorter_params,
+                )
         key["time_of_sort"] = int(time.time())
         sorting = sic.remove_excess_spikes(sorting, recording)
         key["analysis_file_name"], key["object_id"] = _write_sorting_to_nwb(
@@ -270,6 +343,7 @@ class SpikeSorting(SpyglassMixin, dj.Computed):
             (SpikeSortingSelection & key).fetch1("nwb_file_name"),
             key["analysis_file_name"],
         )
+        AnalysisNwbfile().log(key, table=self.full_table_name)
         self.insert1(key, skip_duplicates=True)
 
     @classmethod

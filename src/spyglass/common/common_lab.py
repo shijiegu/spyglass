@@ -42,31 +42,42 @@ class LabMember(SpyglassMixin, dj.Manual):
     _admin = []
 
     @classmethod
-    def insert_from_nwbfile(cls, nwbf):
+    def insert_from_nwbfile(cls, nwbf, config=None):
         """Insert lab member information from an NWB file.
 
         Parameters
         ----------
         nwbf: pynwb.NWBFile
             The NWB file with experimenter information.
+        config : dict
+            Dictionary read from a user-defined YAML file containing values to
+            replace in the NWB file.
         """
+        config = config or dict()
         if isinstance(nwbf, str):
             nwb_file_abspath = Nwbfile.get_abs_path(nwbf, new_file=True)
             nwbf = get_nwb_file(nwb_file_abspath)
 
-        if nwbf.experimenter is None:
+        if "LabMember" in config:
+            experimenter_list = [
+                member_dict["lab_member_name"]
+                for member_dict in config["LabMember"]
+            ]
+        elif nwbf.experimenter is not None:
+            experimenter_list = nwbf.experimenter
+        else:
             logger.info("No experimenter metadata found.\n")
             return
 
-        for experimenter in nwbf.experimenter:
+        for experimenter in experimenter_list:
             cls.insert_from_name(experimenter)
 
             # each person is by default the member of their own LabTeam
             # (same as their name)
 
-            full_name, _, _ = decompose_name(experimenter)
+            full_name, first, last = decompose_name(experimenter)
             LabTeam.create_new_team(
-                team_name=full_name, team_members=[full_name]
+                team_name=full_name, team_members=[f"{last}, {first}"]
             )
 
     @classmethod
@@ -92,7 +103,7 @@ class LabMember(SpyglassMixin, dj.Manual):
         """Load admin list."""
         cls._admin = list(
             (cls.LabMemberInfo & {"admin": True}).fetch("datajoint_user_name")
-        )
+        ) + ["root"]
 
     @property
     def admin(cls) -> list:
@@ -122,12 +133,28 @@ class LabMember(SpyglassMixin, dj.Manual):
         )
 
         if len(query) != 1:
+            remedy = f"delete {len(query)-1}" if len(query) > 1 else "add one"
             raise ValueError(
-                f"Could not find name for datajoint user {dj_user}"
-                + f" in common.LabMember.LabMemberInfo: {query}"
+                f"Could not find exactly 1 datajoint user {dj_user}"
+                + " in common.LabMember.LabMemberInfo. "
+                + f"Please {remedy}: {query}"
             )
 
         return query[0]
+
+    def check_admin_privilege(
+        cls,
+        error_message: str = "User does not have database admin privileges",
+    ):
+        """Check if a user has admin privilege.
+
+        Parameters
+        ----------
+        error_message: str
+            The error message to display if the user is not an admin.
+        """
+        if dj.config["database.user"] not in cls.admin:
+            raise PermissionError(error_message)
 
 
 @schema
@@ -193,17 +220,18 @@ class LabTeam(SpyglassMixin, dj.Manual):
         member_list = []
         for team_member in team_members:
             LabMember.insert_from_name(team_member)
-            query = (
-                LabMember.LabMemberInfo() & {"lab_member_name": team_member}
-            ).fetch("google_user_name")
+            member_dict = {"lab_member_name": decompose_name(team_member)[0]}
+            query = (LabMember.LabMemberInfo() & member_dict).fetch(
+                "google_user_name"
+            )
             if not query:
                 logger.info(
-                    f"Please add the Google user ID for {team_member} in "
-                    + "LabMember.LabMemberInfo to help manage permissions."
+                    "To help manage permissions in LabMemberInfo, please add "
+                    + f"Google user ID for {team_member}"
                 )
             labteammember_dict = {
                 "team_name": team_name,
-                "lab_member_name": team_member,
+                **member_dict,
             }
             member_list.append(labteammember_dict)
             # clear cache for this member
@@ -220,21 +248,39 @@ class Institution(SpyglassMixin, dj.Manual):
     """
 
     @classmethod
-    def insert_from_nwbfile(cls, nwbf):
+    def insert_from_nwbfile(cls, nwbf, config=None):
         """Insert institution information from an NWB file.
 
         Parameters
         ----------
         nwbf : pynwb.NWBFile
             The NWB file with institution information.
-        """
-        if nwbf.institution is None:
-            logger.info("No institution metadata found.\n")
-            return
+        config : dict
+            Dictionary read from a user-defined YAML file containing values to
+            replace in the NWB file.
 
-        cls.insert1(
-            dict(institution_name=nwbf.institution), skip_duplicates=True
+        Returns
+        -------
+        institution_name : string
+            The name of the institution found in the NWB or config file,
+            or None.
+        """
+        config = config or dict()
+        inst_list = config.get("Institution", [{}])
+        if len(inst_list) > 1:
+            logger.info(
+                "Multiple institution entries not allowed. "
+                + "Using the first entry only.\n"
+            )
+        inst_name = inst_list[0].get("institution_name") or getattr(
+            nwbf, "institution", None
         )
+        if not inst_name:
+            logger.info("No institution metadata found.\n")
+            return None
+
+        cls.insert1(dict(institution_name=inst_name), skip_duplicates=True)
+        return inst_name
 
 
 @schema
@@ -244,18 +290,35 @@ class Lab(SpyglassMixin, dj.Manual):
     """
 
     @classmethod
-    def insert_from_nwbfile(cls, nwbf):
+    def insert_from_nwbfile(cls, nwbf, config=None):
         """Insert lab name information from an NWB file.
 
         Parameters
         ----------
         nwbf : pynwb.NWBFile
             The NWB file with lab name information.
+        config : dict
+            Dictionary read from a user-defined YAML file containing values to
+            replace in the NWB file.
+
+        Returns
+        -------
+        lab_name : string
+            The name of the lab found in the NWB or config file, or None.
         """
-        if nwbf.lab is None:
+        config = config or dict()
+        lab_list = config.get("Lab", [{}])
+        if len(lab_list) > 1:
+            logger.info(
+                "Multiple lab entries not allowed. Using the first entry only."
+            )
+        lab_name = lab_list[0].get("lab_name") or getattr(nwbf, "lab", None)
+        if not lab_name:
             logger.info("No lab metadata found.\n")
-            return
-        cls.insert1(dict(lab_name=nwbf.lab), skip_duplicates=True)
+            return None
+
+        cls.insert1(dict(lab_name=lab_name), skip_duplicates=True)
+        return lab_name
 
 
 def decompose_name(full_name: str) -> tuple:

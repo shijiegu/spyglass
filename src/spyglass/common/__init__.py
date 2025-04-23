@@ -7,6 +7,7 @@ from spyglass.common.common_behav import (
     StateScriptFile,
     VideoFile,
     convert_epoch_interval_name_to_position_interval_name,
+    get_position_interval_epoch,
 )
 from spyglass.common.common_device import (
     CameraDevice,
@@ -40,12 +41,7 @@ from spyglass.common.common_interval import (
     intervals_by_length,
 )
 from spyglass.common.common_lab import Institution, Lab, LabMember, LabTeam
-from spyglass.common.common_nwbfile import (
-    AnalysisNwbfile,
-    AnalysisNwbfileKachery,
-    Nwbfile,
-    #NwbfileKachery,
-)
+from spyglass.common.common_nwbfile import AnalysisNwbfile, Nwbfile
 from spyglass.common.common_position import (
     IntervalLinearizationSelection,
     IntervalLinearizedPosition,
@@ -58,7 +54,7 @@ from spyglass.common.common_position import (
 )
 from spyglass.common.common_region import BrainRegion
 from spyglass.common.common_sensors import SensorData
-from spyglass.common.common_session import Session, SessionGroup
+from spyglass.common.common_session import Session
 from spyglass.common.common_subject import Subject
 from spyglass.common.common_task import Task, TaskEpoch
 from spyglass.common.populate_all_common import populate_all_common

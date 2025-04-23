@@ -38,6 +38,28 @@ schema = dj.schema("spikesorting_sorting")
 
 @schema
 class SpikeSortingPipelineParameters(SpyglassMixin, dj.Manual):
+    """Parameters for the spike sorting pipeline
+
+    Parameters
+    ----------
+    pipeline_parameters_name : str
+        A name for this set of parameters
+    preproc_params_name : str
+        Name of the preprocessing parameters to use
+    artifact_parameters : str
+        Name of the artifact detection parameters to use
+    sorter : str
+        Name of the sorting algorithm to use
+    sorter_params_name : str
+        Name of the sorting parameters to use
+    waveform_params_name : str
+        Name of the waveform parameters to use
+    metric_params_name : str
+        Name of the metric parameters to use
+    auto_curation_params_name : str
+        Name of the automatic curation parameters to use
+    """
+
     definition = """
     pipeline_parameters_name: varchar(200)
     ---
@@ -194,16 +216,16 @@ def spikesorting_pipeline_populator(
         )
         SpikeSortingRecordingSelection.insert1(ssr_key, skip_duplicates=True)
 
-    SpikeSortingRecording.populate(interval_dict)
+    SpikeSortingRecording.populate(sort_dict)
 
     # Artifact detection
     logger.info("Running artifact detection")
     artifact_keys = [
         {**k, "artifact_params_name": artifact_parameters}
-        for k in (SpikeSortingRecordingSelection() & interval_dict).fetch("KEY")
+        for k in (SpikeSortingRecordingSelection() & sort_dict).fetch("KEY")
     ]
     ArtifactDetectionSelection().insert(artifact_keys, skip_duplicates=True)
-    ArtifactDetection.populate(interval_dict)
+    ArtifactDetection.populate(sort_dict)
 
     # Spike sorting
     logger.info("Running spike sorting")
@@ -278,7 +300,7 @@ def spikesorting_pipeline_populator(
         curation_keys = (Curation() & sort_dict).fetch("KEY")
         for curation_key in curation_keys:
             CuratedSpikeSortingSelection.insert1(
-                curation_auto_key, skip_duplicates=True
+                curation_key, skip_duplicates=True
             )
 
     # Populate curated spike sorting

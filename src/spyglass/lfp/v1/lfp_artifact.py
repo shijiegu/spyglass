@@ -1,3 +1,5 @@
+import uuid
+
 import datajoint as dj
 import numpy as np
 
@@ -22,12 +24,51 @@ ARTIFACT_DETECTION_ALGORITHMS = {
 
 @schema
 class LFPArtifactDetectionParameters(SpyglassMixin, dj.Manual):
+    """Parameters for detecting LFP artifacts.
+
+    Parameters
+    ----------
+    artifact_params_name : str
+        Name of the artifact detection parameters.
+    artifact_params : dict
+        artifact_detection_algorithm: str
+        artifact_detection_algorithm_params: dict
+            amplitude_thresh_1st : float, optional
+                Amplitude (ad units) threshold for exclusion, should be >=0,
+                defaults to None
+            amplitude_thresh_2nd : float, optional
+                Amplitude (ad units) threshold for exclusion, should be >=0,
+                defaults to None
+            proportion_above_thresh_1st : float, optional,
+                should be>0 and <=1. Proportion of electrodes that need to have
+                threshold crossings, defaults to 1
+            proportion_above_thresh_2nd : float, optional, should be>0 and <=1
+                Proportion of electrodes that need to have threshold crossings,
+                defaults to 1
+            removal_window_ms : float, optional
+                Width of the window in milliseconds to mask out per artifact
+                (window/2 removed on each side of threshold crossing), defaults
+                to 1 ms
+            local_window_ms: float, optional
+                Width of the local time window in milliseconds used for artifact
+                detection. This parameter defines the duration of the local
+                analysis window, defaults to None.
+        referencing: dict, optional
+            ref_on: bool
+            reference_list: list of int
+                Reference electrode IDs.
+            electrode_list: list of int
+                Electrode IDs to be referenced.
+    """
+
     definition = """
     # Parameters for detecting LFP artifact times within a LFP group.
-    artifact_params_name: varchar(200)
+    artifact_params_name: varchar(64)
     ---
     artifact_params: blob  # dictionary of parameters
     """
+
+    # See #630, #664. Excessive key length.
 
     def insert_default(self):
         """Insert the default artifact parameters."""
@@ -123,6 +164,15 @@ class LFPArtifactDetection(SpyglassMixin, dj.Computed):
     """
 
     def make(self, key):
+        """Populate the LFPArtifactDetection table with artifact times.
+
+        1. Fetch parameters and LFP data from LFPArtifactDetectionParameters
+            and LFPV1, respectively.
+        2. Optionally reference the LFP data.
+        3. Pass data to chosen artifact detection algorithm.
+        3. Insert into LFPArtifactRemovedIntervalList, IntervalList, and
+            LFPArtifactDetection.
+        """
         artifact_params = (
             LFPArtifactDetectionParameters
             & {"artifact_params_name": key["artifact_params_name"]}
@@ -130,36 +180,41 @@ class LFPArtifactDetection(SpyglassMixin, dj.Computed):
 
         algorithm = artifact_params["artifact_detection_algorithm"]
         params = artifact_params["artifact_detection_algorithm_params"]
-        lfp_band_ref_id = artifact_params["referencing"]["reference_list"]
 
         # get LFP data
         lfp_eseries = (LFPV1 & key).fetch_nwb()[0]["lfp"]
         sampling_frequency = (LFPV1 & key).fetch("lfp_sampling_rate")[0]
-
-        # do referencing at this step
         lfp_data = np.asarray(
             lfp_eseries.data[:, :],
             dtype=type(lfp_eseries.data[0][0]),
         )
 
-        lfp_band_ref_index = get_electrode_indices(lfp_eseries, lfp_band_ref_id)
-        lfp_band_elect_index = get_electrode_indices(
-            lfp_eseries, artifact_params["referencing"]["electrode_list"]
-        )
-
-        # maybe this lfp_elec_list is supposed to be a list on indices
-
-        for index, elect_index in enumerate(lfp_band_elect_index):
-            if lfp_band_ref_id[index] == -1:
-                continue
-            lfp_data[:, elect_index] = (
-                lfp_data[:, elect_index]
-                - lfp_data[:, lfp_band_ref_index[index]]
-            )
-
         is_diff = algorithm == "difference"
+        # do referencing at this step
+        if "referencing" in artifact_params:
+            ref = artifact_params["referencing"]["ref_on"] if is_diff else None
+            lfp_band_ref_id = artifact_params["referencing"]["reference_list"]
+            if artifact_params["referencing"]["ref_on"]:
+                lfp_band_ref_index = get_electrode_indices(
+                    lfp_eseries, lfp_band_ref_id
+                )
+                lfp_band_elect_index = get_electrode_indices(
+                    lfp_eseries,
+                    artifact_params["referencing"]["electrode_list"],
+                )
+
+                # maybe this lfp_elec_list is supposed to be a list on indices
+                for index, elect_index in enumerate(lfp_band_elect_index):
+                    if lfp_band_ref_id[index] == -1:
+                        continue
+                    lfp_data[:, elect_index] = (
+                        lfp_data[:, elect_index]
+                        - lfp_data[:, lfp_band_ref_index[index]]
+                    )
+        else:
+            ref = False if is_diff else None
+
         data = lfp_data if is_diff else lfp_eseries
-        ref = artifact_params["referencing"]["ref_on"] if is_diff else None
 
         (
             artifact_removed_valid_times,
@@ -176,15 +231,7 @@ class LFPArtifactDetection(SpyglassMixin, dj.Computed):
             dict(
                 artifact_times=artifact_times,
                 artifact_removed_valid_times=artifact_removed_valid_times,
-                # name for no-artifact time name using recording id
-                artifact_removed_interval_list_name="_".join(
-                    [
-                        key["nwb_file_name"],
-                        key["target_interval_list_name"],
-                        "LFP",
-                        key["artifact_params_name"],
-                    ]
-                ),
+                artifact_removed_interval_list_name=uuid.uuid4(),
             )
         )
 
@@ -192,11 +239,11 @@ class LFPArtifactDetection(SpyglassMixin, dj.Computed):
             "nwb_file_name": key["nwb_file_name"],
             "interval_list_name": key["artifact_removed_interval_list_name"],
             "valid_times": key["artifact_removed_valid_times"],
-            "pipeline": "lfp_artifact",
+            "pipeline": self.full_table_name,
         }
 
-        LFPArtifactRemovedIntervalList.insert1(key, replace=True)
-        IntervalList.insert1(interval_key, replace=True)
+        LFPArtifactRemovedIntervalList.insert1(key)
+        IntervalList.insert1(interval_key)
         self.insert1(key)
 
 

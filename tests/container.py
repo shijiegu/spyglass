@@ -46,7 +46,7 @@ class DockerMySQLManager:
         self.mysql_version = mysql_version
         self.container_name = container_name
         self.port = port or "330" + self.mysql_version[0]
-        self.client = docker.from_env()
+        self.client = None if null_server else docker.from_env()
         self.null_server = null_server
         self.password = "tutorial"
         self.user = "root"
@@ -64,10 +64,14 @@ class DockerMySQLManager:
 
     @property
     def container(self) -> docker.models.containers.Container:
+        if self.null_server:
+            return self.container_name
         return self.client.containers.get(self.container_name)
 
     @property
     def container_status(self) -> str:
+        if self.null_server:
+            return None
         try:
             self.container.reload()
             return self.container.status
@@ -76,6 +80,8 @@ class DockerMySQLManager:
 
     @property
     def container_health(self) -> str:
+        if self.null_server:
+            return None
         try:
             self.container.reload()
             return self.container.health
@@ -115,7 +121,7 @@ class DockerMySQLManager:
 
         return self.container.name
 
-    def wait(self, timeout=120, wait=5) -> None:
+    def wait(self, timeout=120, wait=3) -> None:
         """Wait for healthy container.
 
         Parameters
@@ -125,12 +131,12 @@ class DockerMySQLManager:
         wait : int
             Time to wait between checks in seconds. Default 5.
         """
-
         if self.null_server:
             return None
         if not self.container_status or self.container_status == "exited":
             self.start()
 
+        print("")
         for i in range(timeout // wait):
             if self.container.health == "healthy":
                 break
@@ -184,21 +190,21 @@ class DockerMySQLManager:
             return None
 
     @property
-    def creds(self):
+    def credentials(self):
         """Datajoint credentials for this container."""
         return {
             "database.host": "localhost",
             "database.password": self.password,
             "database.user": self.user,
             "database.port": int(self.port),
-            "safmode": "false",
-            "custom": {"test_mode": True},
+            "safemode": "false",
+            "custom": {"test_mode": True, "debug_mode": False},
         }
 
     @property
     def connected(self) -> bool:
         self.wait()
-        dj.config.update(self.creds)
+        dj.config.update(self.credentials)
         return dj.conn().is_connected
 
     def stop(self, remove=True) -> None:
@@ -208,9 +214,10 @@ class DockerMySQLManager:
         if not self.container_status or self.container_status == "exited":
             return
 
-        self.container.stop()
-        self.logger.info(f"Container {self.container_name} stopped.")
+        container_name = self.container_name
+        self.container.stop()  # Logger I/O operations close during teardown
+        print(f"Container {container_name} stopped.")
 
         if remove:
             self.container.remove()
-            self.logger.info(f"Container {self.container_name} removed.")
+            print(f"Container {container_name} removed.")

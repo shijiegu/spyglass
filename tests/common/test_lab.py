@@ -39,9 +39,9 @@ def add_member_team(common_lab, add_admin):
                 last_name="Basic",
             ),
             dict(
-                lab_member_name="This Loner",
+                lab_member_name="This Loner",  # codespell:ignore loner
                 first_name="This",
-                last_name="Loner",
+                last_name="Loner",  # codespell:ignore loner
             ),
         ],
         skip_duplicates=True,
@@ -55,8 +55,8 @@ def add_member_team(common_lab, add_admin):
                 admin=0,
             ),
             dict(
-                lab_member_name="This Loner",
-                google_user_name="This Loner",
+                lab_member_name="This Loner",  # codespell:ignore loner
+                google_user_name="This Loner",  # codespell:ignore loner
                 datajoint_user_name="this_loner",
                 admin=0,
             ),
@@ -71,7 +71,7 @@ def add_member_team(common_lab, add_admin):
     yield
 
 
-def test_labmember_insert_file_str(mini_insert, common_lab, mini_copy_name):
+def test_lab_member_insert_file_str(mini_insert, common_lab, mini_copy_name):
     before = common_lab.LabMember.fetch()
     common_lab.LabMember.insert_from_nwbfile(mini_copy_name)
     after = common_lab.LabMember.fetch()

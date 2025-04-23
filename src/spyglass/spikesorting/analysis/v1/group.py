@@ -1,24 +1,39 @@
 from itertools import compress
+from typing import Optional, Union
 
 import datajoint as dj
 import numpy as np
-from ripple_detection import get_multiunit_population_firing_rate
 
 from spyglass.common import Session  # noqa: F401
+from spyglass.settings import test_mode
 from spyglass.spikesorting.spikesorting_merge import SpikeSortingOutput
-from spyglass.utils.dj_mixin import SpyglassMixin
+from spyglass.utils.dj_mixin import SpyglassMixin, SpyglassMixinPart
+from spyglass.utils.spikesorting import firing_rate_from_spike_indicator
 
 schema = dj.schema("spikesorting_group_v1")
 
 
 @schema
 class UnitSelectionParams(SpyglassMixin, dj.Manual):
+    """Unit selection parameters for sorted spikes
+
+    Parameters
+    ----------
+    unit_filter_params_name : str
+        name of the unit selection parameters
+    include_labels : List[str], optional
+        list of labels to include, by default None
+    exclude_labels : List[str], optional
+        list of labels to exclude, by default None
+    """
+
     definition = """
-    unit_filter_params_name: varchar(128)
+    unit_filter_params_name: varchar(32)
     ---
     include_labels = Null: longblob
     exclude_labels = Null: longblob
     """
+    # NOTE: pk reduced from 128 to 32 to avoid long primary key error
     contents = [
         [
             "all_units",
@@ -39,6 +54,7 @@ class UnitSelectionParams(SpyglassMixin, dj.Manual):
 
     @classmethod
     def insert_default(cls):
+        """Insert default unit selection parameters"""
         cls.insert(cls.contents, skip_duplicates=True)
 
 
@@ -50,7 +66,7 @@ class SortedSpikesGroup(SpyglassMixin, dj.Manual):
     sorted_spikes_group_name: varchar(80)
     """
 
-    class Units(SpyglassMixin, dj.Part):
+    class Units(SpyglassMixinPart):
         definition = """
         -> master
         -> SpikeSortingOutput.proj(spikesorting_merge_id='merge_id')
@@ -63,11 +79,20 @@ class SortedSpikesGroup(SpyglassMixin, dj.Manual):
         unit_filter_params_name: str = "all_units",
         keys: list[dict] = [],
     ):
+        """Create a new group of sorted spikes"""
         group_key = {
             "sorted_spikes_group_name": group_name,
             "nwb_file_name": nwb_file_name,
             "unit_filter_params_name": unit_filter_params_name,
         }
+        if self & group_key:
+            if test_mode:
+                return
+            raise ValueError(
+                f"Group {nwb_file_name}: {group_name} already exists",
+                "please delete the group before creating a new one",
+            )
+
         parts_insert = [{**key, **group_key} for key in keys]
 
         self.insert1(
@@ -84,6 +109,13 @@ class SortedSpikesGroup(SpyglassMixin, dj.Manual):
     ) -> np.ndarray:
         """
         Filter units based on labels
+
+        labels: list of list of strings
+            list of labels for each unit
+        include_labels: list of strings
+            if provided, only units with any of these labels will be included
+        exclude_labels: list of strings
+            if provided, units with any of these labels will be excluded
         """
         include_labels = np.unique(include_labels)
         exclude_labels = np.unique(exclude_labels)
@@ -96,17 +128,42 @@ class SortedSpikesGroup(SpyglassMixin, dj.Manual):
         for ind, unit_labels in enumerate(labels):
             if isinstance(unit_labels, str):
                 unit_labels = [unit_labels]
-            if np.all(~np.isin(unit_labels, include_labels)) or np.any(
-                np.isin(unit_labels, exclude_labels)
-            ):
+            if (
+                include_labels.size > 0
+                and np.all(~np.isin(unit_labels, include_labels))
+            ) or np.any(np.isin(unit_labels, exclude_labels)):
                 # if the unit does not have any of the include labels
                 # or has any of the exclude labels, skip
                 continue
             include_mask[ind] = True
         return include_mask
 
-    @staticmethod
-    def fetch_spike_data(key, time_slice=None):
+    @classmethod
+    def fetch_spike_data(
+        cls,
+        key: dict,
+        time_slice: Union[list[float], slice] = None,
+        return_unit_ids: bool = False,
+    ) -> Union[list[np.ndarray], Optional[list[dict]]]:
+        """fetch spike times for units in the group
+
+        Parameters
+        ----------
+        key : dict
+            dictionary containing the group key
+        time_slice : list of float or slice, optional
+            if provided, filter for spikes occurring in the interval [start, stop], by default None
+        return_unit_ids : bool, optional
+            if True, return the unit_ids along with the spike times, by default False
+            Unit ids defined as a list of dictionaries with keys 'spikesorting_merge_id' and 'unit_number'
+
+        Returns
+        -------
+        list of np.ndarray
+            list of spike times for each unit in the group
+        """
+        key = cls.get_fully_defined_key(key)
+
         # get merge_ids for SpikeSortingOutput
         merge_ids = (
             (
@@ -125,23 +182,33 @@ class SortedSpikesGroup(SpyglassMixin, dj.Manual):
 
         # get the spike times for each merge_id
         spike_times = []
-        for merge_id in merge_ids:
-            nwb_file = SpikeSortingOutput().fetch_nwb({"merge_id": merge_id})[0]
-            nwb_field_name = (
-                "object_id"
-                if "object_id" in nwb_file
-                else "units" if "units" in nwb_file else None
-            )
+        unit_ids = []
+        merge_keys = [dict(merge_id=merge_id) for merge_id in merge_ids]
+        nwb_file_list, merge_ids = (SpikeSortingOutput & merge_keys).fetch_nwb(
+            return_merge_ids=True
+        )
+        for nwb_file, merge_id in zip(nwb_file_list, merge_ids):
+            nwb_field_name = _get_spike_obj_name(nwb_file, allow_empty=True)
             if nwb_field_name is None:
                 # case where no units found or curation removed all units
                 continue
             sorting_spike_times = nwb_file[nwb_field_name][
                 "spike_times"
             ].to_list()
+            file_unit_ids = [
+                {"spikesorting_merge_id": merge_id, "unit_id": unit_id}
+                for unit_id in range(len(sorting_spike_times))
+            ]
 
             # filter the spike times based on the labels if present
-            if "label" in nwb_file[nwb_field_name]:
-                group_label_list = nwb_file[nwb_field_name]["label"].to_list()
+            for col in ("label", "curation_label"):  # v0, v1 names
+                if col in nwb_file[nwb_field_name].columns:
+                    group_labels = nwb_file[nwb_field_name][col]
+                    break
+            else:
+                group_labels = None
+            if group_labels is not None:
+                group_label_list = group_labels.to_list()
                 include_unit = SortedSpikesGroup.filter_units(
                     group_label_list, include_labels, exclude_labels
                 )
@@ -149,9 +216,12 @@ class SortedSpikesGroup(SpyglassMixin, dj.Manual):
                 sorting_spike_times = list(
                     compress(sorting_spike_times, include_unit)
                 )
+                file_unit_ids = list(compress(file_unit_ids, include_unit))
 
             # filter the spike times based on the time slice if provided
             if time_slice is not None:
+                if isinstance(time_slice, (list, tuple)):
+                    time_slice = slice(*time_slice)
                 sorting_spike_times = [
                     times[
                         np.logical_and(
@@ -163,11 +233,28 @@ class SortedSpikesGroup(SpyglassMixin, dj.Manual):
 
             # append the approved spike times to the list
             spike_times.extend(sorting_spike_times)
+            unit_ids.extend(file_unit_ids)
 
+        if return_unit_ids:
+            return spike_times, unit_ids
         return spike_times
 
     @classmethod
     def get_spike_indicator(cls, key: dict, time: np.ndarray) -> np.ndarray:
+        """Get spike indicator matrix for the group
+
+        Parameters
+        ----------
+        key : dict
+            key to identify the group
+        time : np.ndarray
+            time vector for which to calculate the spike indicator matrix
+
+        Returns
+        -------
+        np.ndarray
+            spike indicator matrix with shape (len(time), n_units)
+        """
         time = np.asarray(time)
         min_time, max_time = time[[0, -1]]
         spike_times = cls.fetch_spike_data(key)
@@ -187,22 +274,46 @@ class SortedSpikesGroup(SpyglassMixin, dj.Manual):
 
     @classmethod
     def get_firing_rate(
-        cls, key: dict, time: np.ndarray, multiunit: bool = False
+        cls,
+        key: dict,
+        time: np.ndarray,
+        multiunit: bool = False,
+        smoothing_sigma: float = 0.015,
     ) -> np.ndarray:
-        spike_indicator = cls.get_spike_indicator(key, time)
-        if spike_indicator.ndim == 1:
-            spike_indicator = spike_indicator[:, np.newaxis]
+        """Get time-dependent firing rate for units in the group
 
-        sampling_frequency = 1 / np.median(np.diff(time))
+        Parameters
+        ----------
+        key : dict
+            key to identify the group
+        time : np.ndarray
+            time vector for which to calculate the firing rate
+        multiunit : bool, optional
+            if True, return the multiunit firing rate for units in the group,
+            by default False
+        smoothing_sigma : float, optional
+            standard deviation of gaussian filter to smooth firing rates in
+            seconds, by default 0.015
 
-        if multiunit:
-            spike_indicator = spike_indicator.sum(axis=1, keepdims=True)
-        return np.stack(
-            [
-                get_multiunit_population_firing_rate(
-                    indicator[:, np.newaxis], sampling_frequency
-                )
-                for indicator in spike_indicator.T
-            ],
-            axis=1,
+        Returns
+        -------
+        np.ndarray
+            time-dependent firing rate with shape (len(time), n_units)
+        """
+        return firing_rate_from_spike_indicator(
+            spike_indicator=cls.get_spike_indicator(key, time),
+            time=time,
+            multiunit=multiunit,
+            smoothing_sigma=smoothing_sigma,
         )
+
+
+def _get_spike_obj_name(nwb_file, allow_empty=False):
+    nwb_field_name = (
+        "object_id"
+        if "object_id" in nwb_file
+        else "units" if "units" in nwb_file else None
+    )
+    if nwb_field_name is None and not allow_empty:
+        raise ValueError("NWB file does not have 'object_id' or 'units' field")
+    return nwb_field_name

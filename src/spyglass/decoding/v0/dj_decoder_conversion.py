@@ -25,7 +25,22 @@ try:
     from replay_trajectory_classification.observation_model import (
         ObservationModel,
     )
-except ImportError as e:
+except (ImportError, ModuleNotFoundError) as e:
+    (
+        Identity,
+        RandomWalk,
+        RandomWalkDirection1,
+        RandomWalkDirection2,
+        Uniform,
+        DiagonalDiscrete,
+        RandomDiscrete,
+        UniformDiscrete,
+        UserDefinedDiscrete,
+        Environment,
+        UniformInitialConditions,
+        UniformOneEnvironmentInitialConditions,
+        ObservationModel,
+    ) = [None] * 13
     logger.warning(e)
 from track_linearization import make_track_graph
 

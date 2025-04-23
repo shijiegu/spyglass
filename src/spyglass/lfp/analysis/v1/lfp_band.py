@@ -39,7 +39,6 @@ class LFPBandSelection(SpyglassMixin, dj.Manual):
         -> LFPBandSelection # the LFP band selection
         -> LFPElectrodeGroup.LFPElectrode  # the LFP electrode to be filtered
         reference_elect_id = -1: int  # the reference electrode to use; -1 for no reference
-        ---
         """
 
     def set_lfp_band_electrodes(
@@ -80,18 +79,15 @@ class LFPBandSelection(SpyglassMixin, dj.Manual):
         available_electrodes = query.fetch("electrode_id")
         if not np.all(np.isin(electrode_list, available_electrodes)):
             raise ValueError(
-                "All elements in electrode_list must be valid electrode_ids in the LFPElectodeGroup table"
+                "All elements in electrode_list must be valid electrode_ids in"
+                + " the LFPElectodeGroup table: "
+                + f"{electrode_list} not in {available_electrodes}"
             )
         # sampling rate
         lfp_sampling_rate = LFPOutput.merge_get_parent(lfp_key).fetch1(
             "lfp_sampling_rate"
         )
         decimation = lfp_sampling_rate // lfp_band_sampling_rate
-        if lfp_sampling_rate // decimation != lfp_band_sampling_rate:
-            raise ValueError(
-                f"lfp_band_sampling rate {lfp_band_sampling_rate} is not an integer divisor of lfp "
-                f"samping rate {lfp_sampling_rate}"
-            )
         # filter
         filter_query = FirFilterParameters() & {
             "filter_name": filter_name,
@@ -99,7 +95,8 @@ class LFPBandSelection(SpyglassMixin, dj.Manual):
         }
         if not filter_query:
             raise ValueError(
-                f"filter {filter_name}, sampling rate {lfp_sampling_rate} is not in the FirFilterParameters table"
+                f"Filter {filter_name}, sampling rate {lfp_sampling_rate} is "
+                + "not in the FirFilterParameters table"
             )
         # interval_list
         interval_query = IntervalList() & {
@@ -108,22 +105,23 @@ class LFPBandSelection(SpyglassMixin, dj.Manual):
         }
         if not interval_query:
             raise ValueError(
-                f"interval list {interval_list_name} is not in the IntervalList table; the list must be "
-                "added before this function is called"
+                f"interval list {interval_list_name} is not in the IntervalList"
+                " table; the list must be added before this function is called"
             )
         # reference_electrode_list
         if len(reference_electrode_list) != 1 and len(
             reference_electrode_list
         ) != len(electrode_list):
             raise ValueError(
-                "reference_electrode_list must contain either 1 or len(electrode_list) elements"
+                "reference_electrode_list must contain either 1 or "
+                + "len(electrode_list) elements"
             )
         # add a -1 element to the list to allow for the no reference option
         available_electrodes = np.append(available_electrodes, [-1])
         if not np.all(np.isin(reference_electrode_list, available_electrodes)):
             raise ValueError(
-                "All elements in reference_electrode_list must be valid electrode_ids in the LFPSelection "
-                "table"
+                "All elements in reference_electrode_list must be valid "
+                "electrode_ids in the LFPSelection table"
             )
 
         # make a list of all the references
@@ -175,7 +173,13 @@ class LFPBandV1(SpyglassMixin, dj.Computed):
     """
 
     def make(self, key):
-        # get the NWB object with the lfp data; FIX: change to fetch with additional infrastructure
+        """Populate LFPBandV1"""
+        # create the analysis nwb file to store the results.
+        lfp_band_file_name = AnalysisNwbfile().create(  # logged
+            key["nwb_file_name"]
+        )
+        # get the NWB object with the lfp data;
+        # FIX: change to fetch with additional infrastructure
         lfp_key = {"merge_id": key["lfp_merge_id"]}
         lfp_object = (LFPOutput & lfp_key).fetch_nwb()[0]["lfp"]
 
@@ -204,8 +208,8 @@ class LFPBandV1(SpyglassMixin, dj.Computed):
                 "interval_list_name": interval_list_name,
             }
         ).fetch1("valid_times")
-        # the valid_times for this interval may be slightly beyond the valid times for the lfp itself,
-        # so we have to intersect the two lists
+        # the valid_times for this interval may be slightly beyond the valid
+        # times for the lfp itself, so we have to intersect the two lists
         lfp_valid_times = (
             IntervalList()
             & {
@@ -228,7 +232,8 @@ class LFPBandV1(SpyglassMixin, dj.Computed):
 
         # load in the timestamps
         timestamps = np.asarray(lfp_object.timestamps)
-        # get the indices of the first timestamp and the last timestamp that are within the valid times
+        # get the indices of the first timestamp and the last timestamp that
+        # are within the valid times
         included_indices = interval_list_contains_ind(
             lfp_band_valid_times, timestamps
         )
@@ -267,11 +272,6 @@ class LFPBandV1(SpyglassMixin, dj.Computed):
             & {"filter_name": filter_name}
             & {"filter_sampling_rate": filter_sampling_rate}
         ).fetch(as_dict=True)
-        if len(filter) == 0:
-            raise ValueError(
-                f"Filter {filter_name} and sampling_rate {lfp_band_sampling_rate} does not exit in the "
-                "FirFilterParameters table"
-            )
 
         filter_coeff = filter[0]["filter_coeff"]
         if len(filter_coeff) == 0:
@@ -281,8 +281,6 @@ class LFPBandV1(SpyglassMixin, dj.Computed):
             )
             return None
 
-        # create the analysis nwb file to store the results.
-        lfp_band_file_name = AnalysisNwbfile().create(key["nwb_file_name"])
         lfp_band_file_abspath = AnalysisNwbfile().get_abs_path(
             lfp_band_file_name
         )
@@ -296,12 +294,15 @@ class LFPBandV1(SpyglassMixin, dj.Computed):
             decimation,
         )
 
-        # now that the LFP is filtered, we create an electrical series for it and add it to the file
+        # now that the LFP is filtered, we create an electrical series for it
+        # and add it to the file
         with pynwb.NWBHDF5IO(
             path=lfp_band_file_abspath, mode="a", load_namespaces=True
         ) as io:
             nwbf = io.read()
-            # get the indices of the electrodes in the electrode table of the file to get the right values
+
+            # get the indices of the electrodes in the electrode table of the
+            # file to get the right values
             elect_index = get_electrode_indices(nwbf, lfp_band_elect_id)
             electrode_table_region = nwbf.create_electrode_table_region(
                 elect_index, "filtered electrode table"
@@ -328,8 +329,8 @@ class LFPBandV1(SpyglassMixin, dj.Computed):
         key["analysis_file_name"] = lfp_band_file_name
         key["lfp_band_object_id"] = lfp_band_object_id
 
-        # finally, we need to censor the valid times to account for the downsampling if this is the first time we've
-        # downsampled these data
+        # finally, censor the valid times to account for the downsampling if
+        # this is the first time we've downsampled these data
         key["interval_list_name"] = (
             interval_list_name
             + " lfp band "
@@ -367,6 +368,7 @@ class LFPBandV1(SpyglassMixin, dj.Computed):
                 "previously saved lfp band times do not match current times"
             )
 
+        AnalysisNwbfile().log(key, table=self.full_table_name)
         self.insert1(key)
 
     def fetch1_dataframe(self, *attrs, **kwargs):
@@ -378,7 +380,9 @@ class LFPBandV1(SpyglassMixin, dj.Computed):
         )
 
     def compute_analytic_signal(self, electrode_list: list[int], **kwargs):
-        """Computes the hilbert transform of a given LFPBand signal using scipy.signal.hilbert
+        """Computes the hilbert transform of a given LFPBand signal
+
+        Uses scipy.signal.hilbert to compute the hilbert transform
 
         Parameters
         ----------
@@ -393,7 +397,7 @@ class LFPBandV1(SpyglassMixin, dj.Computed):
         Raises
         ------
         ValueError
-            If any electrodes passed to electrode_list are invalid for the dataset
+            If items in electrode_list are invalid for the dataset
         """
 
         filtered_band = self.fetch_nwb()[0]["lfp_band"]
@@ -402,7 +406,8 @@ class LFPBandV1(SpyglassMixin, dj.Computed):
         )
         if len(electrode_list) != np.sum(electrode_index):
             raise ValueError(
-                "Some of the electrodes specified in electrode_list are missing in the current LFPBand table."
+                "Some of the electrodes specified in electrode_list are missing"
+                + " in the current LFPBand table."
             )
         analytic_signal_df = pd.DataFrame(
             hilbert(filtered_band.data[:, electrode_index], axis=0),
@@ -414,7 +419,7 @@ class LFPBandV1(SpyglassMixin, dj.Computed):
     def compute_signal_phase(
         self, electrode_list: list[int] = None, **kwargs
     ) -> pd.DataFrame:
-        """Computes the phase of a given LFPBand signals using the hilbert transform
+        """Computes phase of LFPBand signals using the hilbert transform
 
         Parameters
         ----------
@@ -442,7 +447,7 @@ class LFPBandV1(SpyglassMixin, dj.Computed):
     def compute_signal_power(
         self, electrode_list: list[int] = None, **kwargs
     ) -> pd.DataFrame:
-        """Computes the power of a given LFPBand signals using the hilbert transform
+        """Computes power LFPBand signals using the hilbert transform
 
         Parameters
         ----------

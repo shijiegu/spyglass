@@ -1,6 +1,7 @@
 import datajoint as dj
 import numpy as np
 import sortingview.views as vv
+from pandas import DataFrame
 from ripple_detection import multiunit_HSE_detector
 from scipy.stats import zscore
 
@@ -17,7 +18,23 @@ schema = dj.schema("mua_v1")
 
 @schema
 class MuaEventsParameters(SpyglassMixin, dj.Manual):
-    """Params to extract times of high mulitunit activity during immobility."""
+    """Params to extract times of high multiunit activity during immobility.
+
+    Parameters
+    ----------
+    mua_param_name : str
+        A name for this set of parameters
+    mua_param_dict : dict
+        Dictionary of parameters, including...
+            minimum_duration : float
+                Minimum duration of MUA event (seconds)
+            zscore_threshold : float
+                Z-score threshold for MUA detection
+            close_event_threshold : float
+                Minimum time between MUA events (seconds)
+            speed_threshold : float
+                Minimum speed for MUA detection (cm/s)
+    """
 
     definition = """
     mua_param_name : varchar(80) # a name for this set of parameters
@@ -55,6 +72,16 @@ class MuaEventsV1(SpyglassMixin, dj.Computed):
     """
 
     def make(self, key):
+        """Populates the MuaEventsV1 table.
+
+        Fetches...
+            - Speed from PositionOutput
+            - Spike indicator from SortedSpikesGroup
+            - Valid times from IntervalList
+            - Parameters from MuaEventsParameters
+        Uses multiunit_HSE_detector from ripple_detection package to detect
+        multiunit activity.
+        """
         speed = self.get_speed(key)
         time = speed.index.to_numpy()
         speed = speed.to_numpy()
@@ -103,15 +130,18 @@ class MuaEventsV1(SpyglassMixin, dj.Computed):
         """Convenience function for returning the marks in a readable format"""
         return self.fetch_dataframe()[0]
 
-    def fetch_dataframe(self):
+    def fetch_dataframe(self) -> list[DataFrame]:
+        """Fetch the MUA times as a list of dataframes"""
         return [data["mua_times"] for data in self.fetch_nwb()]
 
     @classmethod
     def get_firing_rate(cls, key, time):
+        """Get the firing rate of the multiunit activity"""
         return SortedSpikesGroup.get_firing_rate(key, time, multiunit=True)
 
     @staticmethod
     def get_speed(key):
+        """Get the speed of the animal during the recording."""
         position_info = (
             PositionOutput & {"merge_id": key["pos_merge_id"]}
         ).fetch1_dataframe()
@@ -128,6 +158,7 @@ class MuaEventsV1(SpyglassMixin, dj.Computed):
         mua_color="black",
         view_height=800,
     ):
+        """Create a FigURL for the MUA detection."""
         key = self.fetch1("KEY")
         speed = self.get_speed(key)
         time = speed.index.to_numpy()

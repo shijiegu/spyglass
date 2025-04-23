@@ -31,6 +31,9 @@ class ImportedSpikeSorting(SpyglassMixin, dj.Imported):
         """
 
     def make(self, key):
+        """Make without transaction
+
+        Allows populate_all_common to work within a single transaction."""
         orig_key = copy.deepcopy(key)
 
         nwb_file_abs_path = Nwbfile.get_abs_path(key["nwb_file_name"])
@@ -43,13 +46,13 @@ class ImportedSpikeSorting(SpyglassMixin, dj.Imported):
                 logger.warn("No units found in NWB file")
                 return
 
-        from spyglass.spikesorting.spikesorting_merge import (  # noqa: F401
+        from spyglass.spikesorting.spikesorting_merge import (
             SpikeSortingOutput,
-        )
+        )  # noqa: F401
 
         key["object_id"] = nwbfile.units.object_id
 
-        self.insert1(key, skip_duplicates=True)
+        self.insert1(key, skip_duplicates=True, allow_direct_insert=True)
 
         part_name = SpikeSortingOutput._part_name(self.table_name)
         SpikeSortingOutput._merge_insert(
@@ -58,12 +61,14 @@ class ImportedSpikeSorting(SpyglassMixin, dj.Imported):
 
     @classmethod
     def get_recording(cls, key):
+        """Placeholder for merge table to call on all sources."""
         raise NotImplementedError(
             "Imported spike sorting does not have a `get_recording` method"
         )
 
     @classmethod
     def get_sorting(cls, key):
+        """Placeholder for merge table to call on all sources."""
         raise NotImplementedError(
             "Imported spike sorting does not have a `get_sorting` method"
         )
