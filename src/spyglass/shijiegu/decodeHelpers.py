@@ -4,7 +4,6 @@ import pandas as pd
 import xarray as xr
 import logging
 import os
-import cupy as cp
 
 from spyglass.common import (Session, IntervalList,IntervalPositionInfo,
                              LabMember, LabTeam, Raw, Session, Nwbfile,
