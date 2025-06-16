@@ -6,7 +6,6 @@ mysql_config
 memray*
 
 # Notebooks
-*.ipynb
 !notebooks/[0-9]*.ipynb
 
 # Byte-compiled / optimized / DLL files

@@ -169,10 +169,7 @@ class UnitMarks(SpyglassMixin, dj.Computed):
             thresholds the waveform.
         4. Saves the marks as a TimeSeries object in a new AnalysisNwbfile.
         """
-        # create a new AnalysisNwbfile and a timeseries for the marks and save
-        key["analysis_file_name"] = AnalysisNwbfile().create(  # logged
-            key["nwb_file_name"]
-        )
+        
         # get the list of mark parameters
         mark_param = (MarkParameters & key).fetch1()
 
@@ -253,6 +250,11 @@ class UnitMarks(SpyglassMixin, dj.Computed):
             timestamps=timestamps,
             description="spike features for clusterless decoding",
         )
+        # create a new AnalysisNwbfile and a timeseries for the marks and save
+        key["analysis_file_name"] = AnalysisNwbfile().create(  # logged
+            key["nwb_file_name"]
+        )
+        
         key["marks_object_id"] = AnalysisNwbfile().add_nwb_object(
             key["analysis_file_name"], nwb_object
         )

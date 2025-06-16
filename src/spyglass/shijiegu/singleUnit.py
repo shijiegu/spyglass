@@ -33,8 +33,11 @@ from spyglass.shijiegu.ripple_detection import removeDataBeforeTrial1
 from spyglass.common.common_position import IntervalPositionInfo
 from spyglass.linearization.v0.main import IntervalLinearizedPosition
 from spyglass.shijiegu.helpers import interpolate_to_new_time
+from spyglass.shijiegu.curation_manual import get_session_duration
+from spyglass.shijiegu.fragmented_general import find_SWR_time
 
 SNR_THRESHOLD = 5
+INTERNEURON_THRESHOLD = 5 #Hz
 
 def get_nwb_units(nwb_copy_file_name,session_name,sort_group_ids_with_good_cell,curation_id = 0):
     """kept for legacy, but use the function session_unit() in singleUnit instead"""
@@ -134,7 +137,7 @@ def do_mountainSort(nwb_copy_file_name,session_name):
                 SpikeSortingSelection.insert1(artifact_key, skip_duplicates=True)
                 SpikeSorting.populate(artifact_key)
 
-def session_unit(nwb_copy_file_name,session_name,curation_id = 0,return_cell_list = False):
+def session_unit(nwb_copy_file_name,session_name,curation_id = 0,return_cell_list = False,exclude_interneuron = False):
     """return nwb_units for only large SNR units"""
     key = {"nwb_file_name": nwb_copy_file_name,
        "sorter":"mountainsort4",
@@ -146,10 +149,19 @@ def session_unit(nwb_copy_file_name,session_name,curation_id = 0,return_cell_lis
     sort_group_ids_with_good_cell = []
     cell_list = []
     
+    # get session time
+    session_duration = get_session_duration(nwb_copy_file_name,session_name) # in seconds
+    
     for sort_group_id in sort_group_ids:
         nwb_units = electrode_unit(nwb_copy_file_name,session_name,sort_group_id,curation_id=curation_id)
         if nwb_units is None or len(nwb_units)==0:
             continue
+        
+        if exclude_interneuron: #exclude interneuron
+            for cell in nwb_units.index:
+                if nwb_units.loc[cell].num_spikes/session_duration > INTERNEURON_THRESHOLD:
+                    nwb_units = nwb_units.drop(cell)
+                
         nwb_units_all[sort_group_id] = nwb_units
         sort_group_ids_with_good_cell.append(sort_group_id)
         
@@ -201,7 +213,7 @@ def electrode_unit(nwb_copy_file_name,session_name,
 
     return nwb_units
 
-def find_spikes(electrodes_units,cell_list,axis,count = 1):
+def find_spikes(electrodes_units,cell_list,axis,count = 1,z_score = 0):
     """
     Get firing rate matrix over axis
     electrodes_units is a dictionary where keys are electrode
@@ -209,6 +221,7 @@ def find_spikes(electrodes_units,cell_list,axis,count = 1):
         the returned matrix will be in this order in column
     if count: return count matrix
     if not count: return firing rate matrix
+       of shape: time bins x num of neurons
     """
     DELTA_T = axis[1] - axis[0]
     firing_matrix = np.zeros((len(axis)-1,len(cell_list)))
@@ -320,11 +333,12 @@ def spikeLocation(nwb_copy_file_name, session_name, pos_name, electrode,unit):
     return imm_spike_time,linear_segment
 
 
-
-
 def RippleTime2FiringRate(nwb_units,ripple_times,accepted_units,fragFlag = True):
     """filters spikes according to their time, whether cont/frag ripple times"""
 
+    # find ripple time interval
+    intervals = find_SWR_time(ripple_times,1-fragFlag)
+    
     if len(nwb_units)==0:
         return None
     firing_rate_by_ripple = {}
@@ -333,20 +347,12 @@ def RippleTime2FiringRate(nwb_units,ripple_times,accepted_units,fragFlag = True)
         #### THIS IS HOW I GET SPIKE TIMES
         spike_times = nwb_units.loc[u].spike_times
 
-        ind = []
-        for ripple_id in ripple_times.index:
-            if fragFlag:
-                intervals = ripple_times.loc[ripple_id].frag_intvl
-            else:
-                intervals = ripple_times.loc[ripple_id].cont_intvl
-
-
-            for interval in intervals:
-                duration = interval[1]-interval[0] # in seconds
-                spike_count=float(np.sum(
-                    np.logical_and(spike_times>=interval[0],spike_times<=interval[1])))
-                ind.append((spike_count/duration,spike_count,duration))
-
+        ind = [] # poor naming scheme. it contains a list of firing by ripple.
+        for intvl in intervals:
+            duration = intvl[1] - intvl[0]
+            spike_count=float(np.sum(
+                np.logical_and(spike_times>=intvl[0],spike_times<=intvl[1])))
+            ind.append((spike_count/duration,spike_count,duration))
         firing_rate_by_ripple[u] = ind
 
     for u in accepted_units:

@@ -1,7 +1,7 @@
 from typing import Any, List, Union
 
 import datajoint as dj
-import kachery_cloud as kcl
+#import kachery_cloud as kcl
 import sortingview.views as vv
 import spikeinterface as si
 from sortingview.SpikeSortingView import SpikeSortingView

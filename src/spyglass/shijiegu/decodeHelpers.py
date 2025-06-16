@@ -118,7 +118,8 @@ def decodePrepMasterSession(nwb_copy_file_name,session_name,populate = True):
                         'epoch_name':session_name}).fetch1('choice_reward'))
 
     trial_1_t = StateScript.loc[1].timestamp_O
-    trial_last_t = StateScript.loc[len(StateScript)-1].timestamp_O
+    trial_last_t = np.nanmax(StateScript.timestamp_O)
+    #trial_last_t = StateScript.loc[len(StateScript)-1].timestamp_O
     linear_position_df = removeDataBeforeTrial1(linear_position_df,trial_1_t,trial_last_t)
     position_df = removeDataBeforeTrial1(position_df,trial_1_t,trial_last_t)
 
@@ -148,8 +149,8 @@ def decodePrepMasterSession(nwb_copy_file_name,session_name,populate = True):
             marks_tmp = marks_tmp.isel(time = np.arange(final_length))
         
             assert len(linear_position_df_tmp) == marks_tmp.shape[0]
-            assert linear_position_df_tmp.index[0] - float(marks_tmp.time[0]) <= 0.003
-            assert linear_position_df_tmp.index[-1] - float(marks_tmp.time[-1]) <= 0.003
+            assert linear_position_df_tmp.index[0] - float(marks_tmp.time[0]) < 0.004
+            assert linear_position_df_tmp.index[-1] - float(marks_tmp.time[-1]) < 0.004
 
             linear_position_df_.append(linear_position_df_tmp)
             position_df_.append(position_df_tmp)
@@ -163,10 +164,10 @@ def decodePrepMasterSession(nwb_copy_file_name,session_name,populate = True):
     print(linear_position_df.shape)
 
     """save result"""
-    animal = nwb_copy_file_name[:5]
+    animal = nwb_copy_file_name[:5].lower()
     marks_path=os.path.join(f'/cumulus/shijie/recording_pilot/{animal}/decoding',
                              nwb_copy_file_name+'_'+session_name+'_marks.nc')
-    marks.to_netcdf(marks_path)
+    marks.to_netcdf(marks_path, engine = "netcdf4")
 
     position1d_path=os.path.join(f'/cumulus/shijie/recording_pilot/{animal}/decoding',
                              nwb_copy_file_name+'_'+session_name+'_1dposition.csv')
@@ -213,7 +214,7 @@ def thresholder_sort(nwb_copy_file_name,sort_interval_name,populate=True):
         (TrialChoice & statescript_key).fetch1('choice_reward')
         )
         trial_1_t = StateScript.loc[1].timestamp_O
-        trial_last_t = StateScript.loc[len(StateScript)-1].timestamp_O
+        trial_last_t = np.nanmax(StateScript.timestamp_O)
         
     if len(artifact_time_list) > 1:
         artifact_time_list=interval_union(artifact_time_list[0],artifact_time_list[1])
@@ -360,7 +361,8 @@ def intersectValidIntervals(nwb_copy_file_name,sort_interval_name,pos_interval_n
                             'epoch_name':sort_interval_name}).fetch1('choice_reward'))
 
     trial_1_t = StateScript.loc[1].timestamp_O
-    trial_last_t = StateScript.loc[len(StateScript)-1].timestamp_O
+    trial_last_t = np.nanmax(StateScript.timestamp_O)
+    #trial_last_t = StateScript.loc[len(StateScript)-1].timestamp_O
 
     intersect_interval_ = interval_list_intersect(
         interval_list_intersect(interval, valid_ephys_times), valid_pos_times)

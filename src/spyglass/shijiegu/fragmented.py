@@ -149,8 +149,8 @@ def find_spike_count_ratio(nwb_units_all,ripple_times, use_rate= False):
                     ratio.append(100)
                     ratio_dict[(e,u)] = 100
                 elif rate_F == 0 and rate_C > 0:
-                    ratio.append(0.001)
-                    ratio_dict[(e,u)] = 0.001
+                    ratio.append(0.01)
+                    ratio_dict[(e,u)] = 0.01
                 else:
                     ratio.append(np.nan)
                     ratio_dict[(e,u)] = np.nan
@@ -159,8 +159,8 @@ def find_spike_count_ratio(nwb_units_all,ripple_times, use_rate= False):
                     ratio.append(100)
                     ratio_dict[(e,u)] = 100
                 elif count_F == 0 and count_C > 0:
-                    ratio.append(0.001)
-                    ratio_dict[(e,u)] = 0.001
+                    ratio.append(0.01)
+                    ratio_dict[(e,u)] = 0.01
                 elif count_C == 0 and count_F == 0:
                     ratio.append(np.nan)
                     ratio_dict[(e,u)] = np.nan

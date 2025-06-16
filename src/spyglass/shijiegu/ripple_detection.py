@@ -784,10 +784,10 @@ def get_event_stats(event_times, time, zscore_metric, speed):
     for start_time, end_time in event_times:
         ind = np.logical_and(time >= start_time, time <= end_time)
         event_zscore = zscore_metric[ind]
-        mean_zscore.append(np.mean(event_zscore))
-        median_zscore.append(np.median(event_zscore))
-        max_zscore.append(np.max(event_zscore))
-        min_zscore.append(np.min(event_zscore))
+        mean_zscore.append(np.nanmean(event_zscore))
+        median_zscore.append(np.nanmedian(event_zscore))
+        max_zscore.append(np.nanmax(event_zscore))
+        min_zscore.append(np.nanmin(event_zscore))
         duration.append(end_time - start_time)
         max_speed.append(np.nanmax(speed[ind]))
         min_speed.append(np.nanmin(speed[ind]))
@@ -903,9 +903,12 @@ def Gu_ripple_detector(time, filtered_lfps, speed, sampling_frequency,
         # For each ripple detectded by both Kay and Karlsson/MUA, extend to union of time
         #candidate_ripple_list2 = ExtendInterSection(RippleTimes_Kay,MUA_Karlsson)
         candidate_ripple_list2 = ExtendInterSection(RippleTimes_Kay,RippleTimes_Karlsson)
+        
+        RippleTimes = get_event_stats(np.array(candidate_ripple_list2),
+                               time, consensus_trace, speed)
 
-        RippleTimes = _get_event_stats(np.array(candidate_ripple_list2),
-                                time, consensus_trace, speed)
+        #RippleTimes = _get_event_stats(np.array(candidate_ripple_list2),
+        #                        time, consensus_trace, speed)
 
         print("Final events are: " + str(len(RippleTimes)/len(RippleTimes_Kay)) + "from Consensus, due to Karlsson Intersection.\n")
         print("Final events are: " + str(len(RippleTimes)/len(RippleTimes_Karlsson)) + "from Karlsson, due to Kay Intersection.\n")

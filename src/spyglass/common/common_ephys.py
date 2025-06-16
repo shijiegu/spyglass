@@ -490,6 +490,8 @@ class LFP(SpyglassMixin, dj.Imported):
             "sampling_rate", "interval_list_name"
         )
         sampling_rate = int(np.round(sampling_rate))
+        if np.abs(sampling_rate - 30000) < 2:
+            sampling_rate = 30000
 
         valid_times = (
             IntervalList()

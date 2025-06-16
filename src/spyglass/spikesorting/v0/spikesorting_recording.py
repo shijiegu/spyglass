@@ -446,11 +446,24 @@ class SpikeSortingRecording(SpyglassMixin, dj.Computed):
         -------
         recording: si.Recording
         """
-
         nwb_file_abs_path = Nwbfile().get_abs_path(key["nwb_file_name"])
         recording = se.read_nwb_recording(
-            nwb_file_abs_path, load_time_vector=True
+            nwb_file_abs_path, load_time_vector=True,#  samples_for_rate_estimation =
         )
+        if np.isnan(recording.get_sampling_frequency()):
+            samples_for_rate_estimation = 1000
+            # the default in the 0.102.3 version of spikeinterface, samples_for_rate_estimation default to 1000.
+            # if there are nan's in timestamps, this reduces the chance of reading in nan.
+            # the fix should be: 
+            # add 
+            # timestamps = timestamps[~np.isnan(timestamps)] 
+            # to line 505 at
+            # spikeinterface/extractors/nwbextractors.py 
+            recording = se.read_nwb_recording(
+                nwb_file_abs_path, load_time_vector=True, samples_for_rate_estimation = samples_for_rate_estimation
+        )
+        if np.isnan(recording.get_sampling_frequency()):
+            raise ValueError("Spike extractor cannot estimate the recording frequency with default setup.")
 
         valid_sort_times = self._get_sort_interval_valid_times(key)
         # shape is (N, 2)

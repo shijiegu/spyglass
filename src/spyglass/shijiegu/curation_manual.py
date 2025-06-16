@@ -157,7 +157,7 @@ import matplotlib.colors as colors
 cmap = plt.cm.seismic  # Example colormap
 norm = colors.LogNorm(vmin=1/3, vmax=3, clip=True)
 
-def plot_spray_window(waves,color_map = {}, grey_units = None):
+def plot_spray_window(waves,color_map = {}, grey_units = None, norm = norm):
     # grey_units will be plotted grey
     
     fig,axes=plt.subplots(1,6,figsize=(24,4),sharex=True,sharey=True)
