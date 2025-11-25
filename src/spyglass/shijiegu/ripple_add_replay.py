@@ -507,15 +507,15 @@ def plot_decode_spiking(plottimes,t0t1,linear_position_xr,decode,lfp_xr,theta_xr
           title='',savefolder=[],savename=[],
           simple=False,tetrode2ind=None,likelihood=False,
           mua_thresh=0,causal = False,plot_spiking=True,
-          plot_changeofmind = False, turnaround = None, head_direction_sign = None):
+          plot_changeofmind = False, turnaround = None, head_direction_sign = None, width = 18):
     '''
     plotting submodule for plot_decode_spiking()
     plottimes: list of 2 numbers
     t0t1: numpy array of x x 2 numbers, shading region start and end times
     '''
 
-    fig, axes = plt.subplots(6, 1, figsize=(18, 12), sharex=True,
-                             constrained_layout=True, gridspec_kw={"height_ratios": [3,1,1,3,0.5,0.5]},)
+    fig, axes = plt.subplots(7, 1, figsize=(width, 12), sharex=True,
+                             constrained_layout=True, gridspec_kw={"height_ratios": [3,0.5,0.5,1,2,0.5,0.5]},)
     time_slice = slice(plottimes[0], plottimes[1])
 
     (posterior_position_subset,posterior_state_subset,
@@ -537,7 +537,7 @@ def plot_decode_spiking(plottimes,t0t1,linear_position_xr,decode,lfp_xr,theta_xr
     '''Decode and Position data'''
     x_axis=np.arange(plottimes[0],plottimes[1],100)
     posterior_position_subset.plot(
-            x='time', y='position', ax=axes[0], rasterized=True, robust=True, cmap='bone_r')
+            x='time', y='position', ax=axes[0], rasterized=True, robust=True, cmap='bone_r', vmax = 0.04)
     
     axes[0].set_xticks(x_axis, x_axis)
     axes[0].set_aspect('auto')
@@ -563,8 +563,8 @@ def plot_decode_spiking(plottimes,t0t1,linear_position_xr,decode,lfp_xr,theta_xr
 
     # add 50 ms scale bar
     ymin,ymax = axes[0].get_ylim()
-    axes[0].plot([plottimes[0]+0.01,plottimes[0]+0.01+0.05],[ymax-20,ymax-20],linewidth=10,color='firebrick',alpha=0.5)
-    axes[0].text(plottimes[0]+0.01,ymax,'50 ms',fontsize=20)
+    axes[0].plot([plottimes[0]+0.1,plottimes[0]+0.1+0.2],[ymax-20,ymax-20],linewidth=10,color='firebrick',alpha=0.5)
+    axes[0].text(plottimes[0]+0.1,ymax,'200 ms',fontsize=20)
     
     if head_direction_sign is not None:
         axes[0].scatter(head_direction_sign.index,
@@ -576,19 +576,25 @@ def plot_decode_spiking(plottimes,t0t1,linear_position_xr,decode,lfp_xr,theta_xr
         theta_d=np.array(theta_subset.to_array()).astype('int32').T
         theta_t=np.array(theta_subset.time)
         axes[2].plot(theta_t,theta_d)
-        axes[2].set_title('theta LFP')
+        axes[2].set_title('theta LFP',size=15)
 
+    '''broad band LFP'''
+    axe_id_broad = 3
+    if lfp_subset is not None:
+        lfp_labels = list(lfp_subset.keys()) #lfps.columns
+        n_lfps = len(lfp_labels)
+        for lfp_ind, lfp_label in enumerate(lfp_labels[:10]):
+            lfp = lfp_subset[lfp_label]
+            axes[axe_id_broad].plot(lfp.time, lfp_ind * 0.5 + normalize_signal(lfp),color='black',lw=0.5)
+    axes[axe_id_broad].set_title("Broad band LFP",size=15)
+                
     '''spike data and broad band LFP'''
+    axe_id_broad = 4
     if plot_spiking == 1:
         spike_d=np.array(neural_subset.to_array()).astype('int32').T
         spike_t=np.array(neural_subset.time)
 
-        if lfp_subset is not None:
-            lfp_labels = list(lfp_subset.keys()) #lfps.columns
-            n_lfps = len(lfp_labels)
-            for lfp_ind, lfp_label in enumerate(lfp_labels):
-                lfp = lfp_subset[lfp_label]
-                axes[3].plot(lfp.time, lfp_ind + normalize_signal(lfp),color='black',lw=0.5)
+        
 
         if simple: #each tetrode plot all channel's spiking data
             tetrodes = list(tetrode2ind.keys())
@@ -600,25 +606,31 @@ def plot_decode_spiking(plottimes,t0t1,linear_position_xr,decode,lfp_xr,theta_xr
                 spike_data = binarize_signal_negative(spike_d[:,tetrode2ind[tetrode]])/6
                 for chi in range(spike_data.shape[1]):
                     spike_time = spike_t[np.argwhere(spike_data[:,chi]).ravel()]
-                    axes[3].scatter(spike_time, np.ones(len(spike_time)) + i + chi/4,rasterized=True,marker='|',color = 'salmon',alpha = 0.5)
+                    axes[axe_id_broad].scatter(spike_time, np.ones(len(spike_time)) + i + chi/4,rasterized=True,marker='|',color = 'navy',alpha = 0.5)
 
                 # plot positive signal
                 spike_data = binarize_signal_positive(spike_d[:,tetrode2ind[tetrode]])/6
                 for chi in range(spike_data.shape[1]):
                     spike_time = spike_t[np.argwhere(spike_data[:,chi]).ravel()]
-                    axes[3].scatter(spike_time, np.ones(len(spike_time)) + i + chi/4,rasterized=True,marker='|',color = 'navy')
+                    axes[axe_id_broad].scatter(spike_time, np.ones(len(spike_time)) + i + chi/4,rasterized=True,marker='|',color = 'navy')
 
-                #axes[3].plot(spike_t, normalize_signal(spike_d[:,tetrode_ind[i]])+i,linewidth=0.3,rasterized=True,color = 'k')
-                axes[3].set_title('spiking, each row comes from one channel per tetrode',size=10)
+                #axes[axe_id_broad].plot(spike_t, normalize_signal(spike_d[:,tetrode_ind[i]])+i,linewidth=0.3,rasterized=True,color = 'k')
+                axes[axe_id_broad].set_title('spiking, each row comes from one channel per tetrode',size=15)
         else:
             numtrodes=np.shape(spike_d)[1]
             for i in range(numtrodes):
-                axes[3].plot(spike_t, normalize_signal(spike_d[:,i])+i,linewidth=0.3,rasterized=True,color = 'k')
-                axes[3].set_title('spiking, each row is a tetrode channel',size=10)
+                axes[axe_id_broad].plot(spike_t, normalize_signal(spike_d[:,i])+i,linewidth=0.3,rasterized=True,color = 'k')
+                axes[axe_id_broad].set_title('spiking, each row is a tetrode channel',size=15)
     elif plot_spiking == 2:
         spike_d=np.array(neural_subset.to_array()).astype('int32').T
         spike_t=np.array(neural_subset.time)
-        axes[3].imshow(spike_d,extent=[0, spike_d.shape[1], 0, spike_d.shape[0]],
+        axes[axe_id_broad].imshow(spike_d,extent=[0, spike_d.shape[1], 0, spike_d.shape[0]],
+               aspect = 'auto',vmax = 3)
+    elif plot_spiking == 3:
+        spike_d=np.array(neural_subset.to_array())
+        spike_t=np.array(neural_subset.time)
+        axes[3].imshow(spike_d,extent=[spike_t[0], spike_t[-1], 0, spike_d.shape[0]],
+        #axes[axe_id_broad].imshow(spike_d,extent=[0, spike_d.shape[1], 0, spike_d.shape[0]],
                aspect = 'auto',vmax = 3)
 
 
@@ -658,21 +670,23 @@ def plot_decode_spiking(plottimes,t0t1,linear_position_xr,decode,lfp_xr,theta_xr
 
 
     '''speed information'''
+    axe_id_speed = 5
     head_speed_plot = np.array(head_speed_subset.to_array()).ravel()
-    axes[4].plot(np.array(head_speed_subset.time),head_speed_plot)
-    axes[4].set_ylim([0, np.nanmax(head_speed_plot)])
-    axes[4].set_title('animal head speed cm/s')
+    axes[axe_id_speed].plot(np.array(head_speed_subset.time),head_speed_plot)
+    axes[axe_id_speed].set_ylim([0, np.nanmax(head_speed_plot)])
+    axes[axe_id_speed].set_title('animal head speed cm/s',size=15)
     
     if plot_changeofmind:
         for turn_ind in range(np.shape(turnaround)[0]):
             axes[0].axvspan(turnaround[turn_ind][0], turnaround[turn_ind][1], color = "red", alpha = 0.2)
             axes[1].axvspan(turnaround[turn_ind][0], turnaround[turn_ind][1], color = "red", alpha = 0.2)
-            axes[4].axvspan(turnaround[turn_ind][0], turnaround[turn_ind][1], color = "red", alpha = 0.2)
+            axes[axe_id_speed].axvspan(turnaround[turn_ind][0], turnaround[turn_ind][1], color = "red", alpha = 0.2)
         
 
+    axe_id_headorient = 6
     phi=head_orientation_subset.diff("head_orientation")
-    axes[5].plot(np.array(phi.time),np.array(phi.head_orientation))
-    axes[5].set_title('animal head angular speed')
+    axes[axe_id_headorient].plot(np.array(phi.time),np.array(phi.head_orientation))
+    axes[axe_id_headorient].set_title('animal head angular speed',size=15)
 
     if len(t0t1) > 0:
         for i in range(1,6):
@@ -749,8 +763,8 @@ def plot_decode_sortedSpikes(nwb_copy_file_name,session_name,
 
     # add 50 ms scale bar
     ymin,ymax = axes[0].get_ylim()
-    axes[0].plot([plottimes[0]+0.01,plottimes[0]+0.01+0.05],[ymax-20,ymax-20],linewidth=10,color='firebrick',alpha=0.5)
-    axes[0].text(plottimes[0]+0.01,ymax,'50 ms',fontsize=20)
+    axes[0].plot([plottimes[0]+0.1,plottimes[0]+0.1+0.200],[ymax-20,ymax-20],linewidth=10,color='firebrick',alpha=0.5)
+    axes[0].text(plottimes[0]+0.1,ymax,'200 ms',fontsize=20)
     
     if head_direction_sign is not None:
         axes[0].scatter(head_direction_sign.index,

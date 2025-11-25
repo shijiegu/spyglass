@@ -408,7 +408,7 @@ class Waveforms(SpyglassMixin, dj.Computed):
         we : spikeinterface.WaveformExtractor
         """
         we_path = (self & key).fetch1("waveform_extractor_path")
-        we = si.WaveformExtractor.load_from_folder(we_path)
+        we = si.WaveformExtractor.load_from_folder(we_path,with_recording=False)
         return we
 
     def fetch_nwb(self, key):

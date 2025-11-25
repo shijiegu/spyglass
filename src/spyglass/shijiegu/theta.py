@@ -162,6 +162,8 @@ def return_skaggs_theta(nwb_copy_file_name,pos_name,session_name,
     theta_df = theta_xr.to_dataframe()
 
     # shift by Skaggs
+    # Global phase zero was defined to be the point in the theta
+    # cycle corresponding to maximal pyramidal cell activity
     delta = return_theta_offset(pos1d,pos2d,theta_df,nwb_units_all,cell_list)
 
     theta_df.phase0 = theta_df.phase0 - delta

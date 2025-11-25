@@ -365,7 +365,7 @@ def RippleTime2FiringRate(nwb_units,ripple_times,accepted_units,fragFlag = True)
 
     return firing_rate_by_ripple, firing_rate
 
-def findWaveForms(nwb_copy_file_name,epoch_name,eletrode,curation_id = 0):
+def findWaveForms(nwb_copy_file_name,epoch_name,eletrode,curation_id = 0,return_waveform = False):
     """returns waveform_extractor, which has memmap for waveforms"""
 
     artifact_name = f'{nwb_copy_file_name}_{epoch_name}_{eletrode}_franklab_tetrode_hippocampus_ampl_1500_prop_075_1ms_artifact_removed_valid_times_track_time_only'
@@ -379,7 +379,9 @@ def findWaveForms(nwb_copy_file_name,epoch_name,eletrode,curation_id = 0):
            }
 
     nwb_units = (CuratedSpikeSorting() & key).fetch_nwb()[0]["units"]
-    waveform_extractor = Waveforms().load_waveforms(key)
+    waveform_extractor = None
+    if return_waveform:
+        waveform_extractor = Waveforms().load_waveforms(key)
 
     return nwb_units,waveform_extractor
 

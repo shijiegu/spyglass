@@ -16,410 +16,343 @@ from spyglass.common.common_position import IntervalPositionInfo, RawPosition, I
 
 from ripple_detection.core import segment_boolean_series
 
-from spyglass.shijiegu.Analysis_SGU import TrialChoice,EpochPos,MUA,get_linearization_map
+from spyglass.shijiegu.Analysis_SGU import TrialChoice,EpochPos,MUA,get_linearization_map,DecodeIngredients, DecodeResults2D, ChangeofMind, ChangeofMindTheta, DecodeResultsLinear
+
 from spyglass.shijiegu.decodeHelpers import runSessionNames
 from spyglass.shijiegu.ripple_add_replay import (plot_decode_spiking,
                                                  select_subset_helper,select_subset_helper_pd,
                                                  find_start_end,position_posterior2arm_posterior)
-from spyglass.shijiegu.changeOfMind import (find_turnaround_time, findProportion,
-            find_trials, find_trials_session, load_epoch_data_wrapper, find_direction, find_trials_animal)
+from spyglass.shijiegu.changeOfMind import find_trials_session
 from spyglass.shijiegu.load import load_decode
-from spyglass.shijiegu.changeOfMind_triggered import region, linear_map, find_triggered_session
+from spyglass.shijiegu.changeOfMind_triggered import linear_map, find_triggered_session
 import statsmodels.api as sm
+from spyglass.shijiegu.changeOfMind_triggered import select_subset_helper_position
+from spyglass.shijiegu.changeOfMind_triggered_position import load_triggered_position_decode_day
+from spyglass.shijiegu.changeOfMind_triggered import wellregion, region
 
-def find_remote_theta_animal(animal,list_of_days,
-                             proportion = 0.05,
-                             delta_t_minus = 1,delta_t_plus = 3,
-                             max_flag = False,
-                             nearby = False, # use nearby trial's outbound or inbound
-                             home = False # find remote replay when the animal is walking out of home arm
-                             ):
-    (day_session_animal, trials_animal, time_intervals_animal, arm_identities_animal, triggered_trial_info_animal) = (
-        [],[],[],[],[])
+
+from spyglass.shijiegu.changeOfMind import node_positions
+node_indices = [[1,8],[8,6],[6,4],[4,2],[2,1]]
+
+def get_handedness(p_rat, p0, p1):
+    """
+    https://www.eecs.umich.edu/courses/eecs380/HANDOUTS/PROJ2/InsidePoly.html
+    # Given a line segment between P0 (x0,y0) and P1 (x1,y1),
+    #    another point P (x,y) has the following relationship to the line segment.
+    # Compute (y - y0)(x1 - x0) - (x - x0)(y1 - y0)
+    """
+    (x, y) = p_rat[:,0], p_rat[:,1]
+    (x0, y0) = p0
+    (x1, y1) = p1
+    handedness = (y - y0) * (x1 - x0) - (x - x0) * (y1 - y0)
+    return handedness < 0
+
+def is_rat_interior(p_rat):
+    handedness = 1
+    for e in node_indices:
+        n0, n1 = e
+        p0 = node_positions[n0]
+        p1 = node_positions[n1]
+        handedness_ = get_handedness(p_rat, p0, p1)
+        handedness = handedness * handedness_
+    return handedness > 0
+
+def find_posterior_sum_segment(triggered_position, triggered_trial_info, log,
+                               position_2d, position_1d, posterior1d,
+                               decode_positions,animal_positions,speed_threshold,
+                               use_center = False, use_home = True, normalized = True):
     
+    # find t0, t1 to consider
+    trialID = triggered_trial_info[2]
+    (t0, t1) = (triggered_position.index[0],triggered_position.index[-1])
+    timestamp_H = log.loc[trialID,'timestamp_H']
+    if not np.isnan(timestamp_H):
+        t0 = timestamp_H #np.min([t0, timestamp_H])
+        
+    position2d_subset = position_2d[np.logical_and(position_2d.time>=t0, position_2d.time<=t1)]
+    position1d_subset = position_1d[np.logical_and(position_1d.time>=t0, position_1d.time<=t1)]
+    
+    # Restrict to moments when the animal is moving
+    if speed_threshold is not None:
+        subset_ind = position2d_subset.head_speed >= speed_threshold
+        position2d_subset = position2d_subset[subset_ind]
+        position1d_subset = position1d_subset[subset_ind]
+    
+    if use_center:
+        return find_arm_posterior_sum_position_2D(
+            position2d_subset, posterior1d, is_rat_interior, decode_positions[:,0], decode_positions[:,1],normalized)
+    
+    # Restrict to moments when the animal is at home arm
+    if use_home:
+        subset_ind = position1d_subset.track_segment_id == 0
+        position2d_subset = position2d_subset[subset_ind]
+        position1d_subset = position1d_subset[subset_ind]
+    
+    if use_home:
+        assert decode_positions.shape[0] == 1
+    assert decode_positions.shape[1] == 2
+    
+    posterior_all = []
+    num_time_bins = []
+    for decode_position_ind in range(decode_positions.shape[0]):
+        posterior_bin = []
+        time_bin_bin = []   
+        decode_p0, decode_p1 = decode_positions[decode_position_ind]
+        for position_ind in range(animal_positions.shape[0]):
+            p0, p1 = animal_positions[position_ind]
+            posterior_bin_, num_time_bins_ = find_posterior_sum_position(position1d_subset, posterior1d, p0, p1, decode_p0, decode_p1, normalized)
+            posterior_bin.append(posterior_bin_)
+            time_bin_bin.append(num_time_bins_)
+            
+        posterior_all.append(posterior_bin)
+        if decode_position_ind == 0:
+            num_time_bins.append(time_bin_bin)
+    
+    return posterior_all, num_time_bins
+    
+def find_posterior_sum_position(position1d_subset, posterior1d, p0, p1, decode_p0, decode_p1, normalized = True):
+    """
+    find posterior sum when the animal is between position 0 and position 1,
+     sum across all the decode between decode_p0 and decode_p1
+    """
+    
+    position_ind = np.logical_and(position1d_subset.linear_position >= p0,
+                                  position1d_subset.linear_position < p1)
+    if np.sum(position_ind) == 0:
+        return np.nan, 0
+    bin_time = position1d_subset[position_ind].time #time in this spatial bin
+    
+    if normalized:
+        posterior1d_subset = posterior1d.sel(time = np.array(bin_time)).sum("time") / len(bin_time)
+    else:
+        posterior1d_subset = posterior1d.sel(time = np.array(bin_time)).sum("time")
+
+    posterior1d_subset = select_subset_helper_position(posterior1d_subset, [decode_p0, decode_p1]) #find home arm local representation
+    posterior1d_bin = float(posterior1d_subset.sum("position").acausal_posterior)
+    
+    return posterior1d_bin, len(bin_time)
+
+def find_arm_posterior_sum_position_2D(position_2d, posterior1d, is_rat_interior, decode_p0, decode_p1, normalized = True):
+    """
+    find posterior sum when the animal is in a 2D region (determined by is_rat_interior), which is a list of edges, clockwise
+     sum across all the decode between decode_p0 and decode_p1
+    """
+    p_rat = np.hstack((np.array(position_2d.head_position_x).reshape((-1,1)),
+                       np.array(position_2d.head_position_y).reshape((-1,1))))
+    position_ind = is_rat_interior(p_rat)
+    bin_time = position_2d[position_ind].time #time in this spatial bin
+    
+    if normalized:
+        posterior1d_subset = posterior1d.sel(time = np.array(bin_time)).sum("time") / len(bin_time)
+    else:
+        posterior1d_subset = posterior1d.sel(time = np.array(bin_time)).sum("time")
+        
+    posterior1d_subset_sum = []
+    for region_ind in range(len(decode_p0)):
+        decode_p0_, decode_p1_ = decode_p0[region_ind], decode_p1[region_ind]
+        posterior1d_subset_region = select_subset_helper_position(
+            posterior1d_subset, [decode_p0_, decode_p1_]) #find home arm local representation
+        posterior1d_subset_sum.append(float(posterior1d_subset_region.sum("position").acausal_posterior))
+    
+    return posterior1d_subset_sum, len(bin_time)
+
+
+def find_remote_theta_animal_new(animal,list_of_days,classifier_param_name,encoding_set,
+                                 control = False,
+                                 use_1d = True, use_center = False, use_outer = False, use_home = True, use_all_outers = False,
+                                 proportion = 0.05,
+                                 delta_t_minus = 5,delta_t_plus = 0, segment_only = False,
+                                 speed_threshold = None,
+                                 normalized = True,
+                                 max_flag = False):
+    """
+    use_1d: if True, use 1D decoding. if False, use 1D decoding collapsed from 2D decoding
+    use_center: if True, consider moments when the rat in the center platform, and find decodes that in are outer arms
+    use_outer: if True, consider moments when the rat is in outer arms, and find decodes that are in the same outer arms
+    use_all_outers: if True, consider moments when the rat is in one outer arm, and find decodes that are in all outer arms.
+    """
+    # define home bins
+    linear_map,node_location=get_linearization_map()
+    if use_center: 
+        decode_positions = linear_map[6:10]
+        animal_positions = None #will use isinterior function instead in the find_posterior_sum_segment()
+    elif use_home:
+        home_end_1D = linear_map[0][1] #home end location in cm
+        decode_positions = np.array([0,home_end_1D]).reshape((1,-1))
+        animal_positions_ = np.linspace(10,home_end_1D,10) #10 bins
+        animal_positions = np.array(
+            [[animal_positions_[ind],animal_positions_[ind+1]] for ind in range(len(animal_positions_)-1)]
+            ).reshape((-1,2))
+        
+
+    # alternatively
+    # home_positions = results1d.position[results1d.position <= home_end_1D]
+    
+    posterior_home_all = []
+    triggered_trial_info_all = []
+    bin_nums_all = []
+
     for day in list_of_days:
         nwb_file_name = animal.lower() + day + '.nwb'
         nwb_copy_file_name = get_nwb_copy_filename(nwb_file_name)
-        print(nwb_copy_file_name)
         session_interval, position_interval = runSessionNames(nwb_copy_file_name)
+        
+        paramters = {"proportion": proportion,
+                         "delta_t_minus":delta_t_minus, "delta_t_plus":delta_t_plus,
+                         "max_flag":max_flag, "segment_only": segment_only,
+                         "control": control, "multiple_CoM": 0, "single_CoM": 1, "first_CoM": 0
+                         }
+        loaded_data = load_triggered_position_decode_day(animal, day, encoding_set, classifier_param_name,
+                                            **paramters)
+
+        triggered_positions, triggered_trial_infos = (
+                    loaded_data["triggered_positions_baseoff"],
+                    loaded_data["triggered_trial_info"],
+            )
+            
+        for ind in range(len(session_interval)):
+            
+            session_name = session_interval[ind]
+            position_name = position_interval[ind]
+            epoch_num = int(session_name[:2])
+            
+            event_indices_session = [ind for ind in range(len(triggered_trial_infos)) if triggered_trial_infos[ind][1]==session_name]
+            if len(event_indices_session) == 0:
+                continue
+            
+            # log
+            key={'nwb_file_name':nwb_copy_file_name,'epoch':epoch_num,'proportion': proportion}
+            print(ChangeofMind & key)
+            log = ChangeofMind().fetch1_dataframe(key)
+            session_name = (TrialChoice & key).fetch1('epoch_name')
+            
+            entry = DecodeIngredients & {'nwb_file_name':nwb_copy_file_name,
+                             'interval_list_name':session_name}
+            # position_1d,position_2d,
+            position_1d = pd.read_csv(entry.fetch1('position_1d')) #still need 1D position
+            position_2d = pd.read_csv(entry.fetch1('position_2d')) # need 2D position
+
+            # load decode
+            results1d = load_decode(nwb_copy_file_name,
+                                    session_name,
+                                    classifier_param_name = classifier_param_name,
+                                    encoding_set = encoding_set,
+                                    use_1d = use_1d)
+            posterior1d = results1d.sum("state")
+            
+            event_indices_session = [ind for ind in range(len(triggered_trial_infos)) if triggered_trial_infos[ind][1]==session_name]
+            #event_indices_session = [ind for ind in range(len(triggered_trial_infos)) if triggered_trial_infos[ind][1]==session_name and triggered_trial_infos[ind][0]==day]
+            
+            for event_index in event_indices_session:
+                print(f"working on event_index{event_index}")
+                # get arm
+                if use_outer and not use_all_outers:
+                    arm = triggered_trial_infos[event_index][-1]
+                    arm_start_end = region[arm + 5]
+                    decode_positions = arm_start_end.reshape((1,-1))
+                    
+                    animal_positions_ = np.linspace(arm_start_end[0],arm_start_end[-1],10) #15 bins
+                    animal_positions = np.array(
+                        [[animal_positions_[ind],animal_positions_[ind+1]] for ind in range(len(animal_positions_)-1)]
+                        ).reshape((-1,2))
+        
+                
+                if use_all_outers:
+                    arm = triggered_trial_infos[event_index][-1]
+                    arm_start_end = region[arm + 5]
+                    animal_positions = arm_start_end.reshape((1,-1))
+                    
+                    all_arms = [1,2,3,4]#[a for a in [1,2,3,4] if a != arm]
+                    decode_positions = []
+                    for a in all_arms:
+                        arm_start_end = wellregion[a + 5]
+                        decode_positions = decode_positions + list(arm_start_end)
+                    decode_positions = np.array(decode_positions).reshape((-1,2))
+                
+                posterior_home, num_time_bins = find_posterior_sum_segment(triggered_positions[event_index], triggered_trial_infos[event_index],
+                                                        log,
+                                                        position_2d, position_1d,
+                                                        posterior1d, decode_positions, animal_positions, speed_threshold, use_center, use_home, normalized)
+
+                posterior_home_all.append(posterior_home)
+                triggered_trial_info_all.append(triggered_trial_infos[event_index])
+                bin_nums_all.append(num_time_bins)
+
+    if use_home:
+        return posterior_home_all, animal_positions, bin_nums_all
+    elif use_outer and not use_all_outers:
+        return posterior_home_all, animal_positions - animal_positions[0], bin_nums_all
+    return posterior_home_all, triggered_trial_info_all, bin_nums_all
+            
+                    
+  
+def classify_remote_chosen_theta_animal(animal,list_of_days,posterior_by_arm, trial_info, proportion = 0.1, normalized = True):
+    
+    # for each trial, find the final chosen arm
+    chosen_arms = []
+    initial_arms = []
+    event_indices = []
+
+    for day in list_of_days:
+        nwb_file_name = animal.lower() + day + '.nwb'
+        nwb_copy_file_name = get_nwb_copy_filename(nwb_file_name)
+        session_interval, position_interval = runSessionNames(nwb_copy_file_name)
+                
         for ind in range(len(session_interval)):
             session_name = session_interval[ind]
             position_name = position_interval[ind]
-            (trials_session,
-             time_intervals_session,
-             arm_identity_session, triggered_trial_info) = find_remote_theta_session(
-                 nwb_copy_file_name,session_name,position_name,proportion,
-                 delta_t_minus,delta_t_plus,
-                 max_flag,nearby,home)
-            
-            day_session_animal.append([nwb_copy_file_name,session_name])
-            trials_animal.append(trials_session)
-            time_intervals_animal.append(time_intervals_session)
-            arm_identities_animal.append(arm_identity_session)
-            triggered_trial_info_animal.append(triggered_trial_info)
-            
-    return day_session_animal,trials_animal,time_intervals_animal,arm_identities_animal,triggered_trial_info_animal
-            
-def find_remote_theta_session(nwb_copy_file_name,session_name,position_name,proportion,
-                              delta_t_minus,delta_t_plus,
-                              max_flag,nearby,home):
-    # 1. load session's linear position info
-    print('currently investigating:')
-    print(session_name)
-    print(position_name)
-    animal = nwb_copy_file_name[:5]
-    
-    linear_position_info=(IntervalLinearizedPosition() & {
-        'nwb_file_name':nwb_copy_file_name,
-        'interval_list_name':position_name,
-        'position_info_param_name':'default_decoding'}).fetch1_dataframe()
-
-    position_info = (IntervalPositionInfo() & {
-        'nwb_file_name':nwb_copy_file_name,
-        'interval_list_name':position_name,
-        'position_info_param_name':'default_decoding'}).fetch1_dataframe()
-    
-    key={'nwb_file_name':nwb_copy_file_name,'epoch':int(session_name[:2])}
-    log=(TrialChoice & key).fetch1('choice_reward')
-    log_df=pd.DataFrame(log)
-    
-    decode_options = {}
-    if animal.lower() == "eliot":
-        decode_options["encoding_set"] = '2Dheadspeed_above_4_andlowmua'
-        decode_options["classifier_param_name"] = 'default_decoding_gpu_4armMaze'
-        decode_options["decode_threshold_method"] = 'MUA_0SD'
-        decode_options["causal"] = False
-    else:
-        decode_options["encoding_set"] = '2Dheadspeed_above_4'
-        decode_options["classifier_param_name"] = 'default_decoding_gpu_4armMaze'
-        decode_options["decode_threshold_method"] = 'MUA_M05SD'
-        decode_options["causal"] = False
-    
-    decode = load_decode(nwb_copy_file_name,session_name,decode_options["classifier_param_name"],
-                         decode_options["encoding_set"])
-    
-    (triggered_positions, triggered_positions_abs,
-     triggered_decodes, triggered_decodes_baseoff,
-     triggered_decodes_abs, triggered_trial_info) = find_triggered_session(
-         nwb_copy_file_name,session_name,position_name,
-         delta_t_minus,delta_t_plus,max_flag,
-         proportion = proportion,first_CoM= True, segment_only = False, nearby = nearby)
-     
-    trials_session = []
-    time_intervals_session = []
-    arm_identity_session =[]
-    
-    for trial_ind in range(len(triggered_positions)):
-        triggered_position = triggered_positions[trial_ind]
-        triggered_position_abs = triggered_positions_abs[trial_ind]
-        
-        (trials, time_intervals, arm_identity) = turnaround_triggered_remote_decode(
-            triggered_position,triggered_position_abs,decode,log_df,
-            linear_position_info,position_info,max_flag,home)
-    
-        if len(trials) == 0:
-            continue
-        
-        if home and len(trials_session) > 0:
-            if trials_session[-1][-1] == trials[-1]:
-                # because for each trial there can be multiple change of minds,
-                # but we only look at the the home remote,
-                # so this "continue" essentially just make sure we have at most interval on each trial
-                continue
-        trials_session.append(trials)
-        time_intervals_session.append(time_intervals)
-        arm_identity_session.append(arm_identity)
-        
-    # in return, we include, triggered_trial_info, which is all the snippets remote representation finder inspected.
-    return trials_session,time_intervals_session,arm_identity_session,triggered_trial_info
-        
-def turnaround_triggered_remote_decode_home(triggered_position,triggered_position_abs,
-                                decode,log_df,linear_position_info,max_flag = 1):
-    """
-    This function is similar to turnaround_triggered_remote_decode(),
-    but only for parsing remote content at home
-    # 1. find time points out side of arm position
-    # 2. for each time interval, find arm
-    #   decode should pass certain criteria:
-    #   (a) be continuous in decoder state
-    #   (b) posterior >= threshold%
-    # 3. return for each trial a list of time range and arm identity for the decode
-
-    INPUT: decode should be the absolute
-    """
-    # segment only: consider posterior in that arm only
-    
-    position_axis = np.array(decode.coords['position'])
-        
-    # infer the turn around time
-    t = np.array(triggered_position_abs.index)[np.argmin(np.abs(triggered_position.index-0))]
-
-    # find the arm the animal is at: select subset of decode
-    (t0,t1) = (triggered_position_abs.index[0]-0.0001,triggered_position_abs.index[-1]+0.0001)
-    # add a little for floating point
-    decode_subset = select_subset_helper(decode,(t0,t1))  
-    
-    posterior_position_subset = decode_subset.causal_posterior.sum(dim='state')
-    
-    # find the arm the animal is at
-    (t0_peak,t1_peak) = (t-0.001, t+0.001)
-    subset_ind = (linear_position_info.index >= t0_peak) & (linear_position_info.index <= t1_peak)
-    subset_linear = linear_position_info.loc[subset_ind]
-    subset_arm = np.unique(subset_linear.track_segment_id)
-    
-    # get the arm bound
-    (arm_base, arm_top) = region[int(subset_arm)]
-    
-    # get max posterior
-    if max_flag:
-        max_posterior_position = np.array(position_axis[posterior_position_subset.argmax(dim = 'position')])
-
-    # get mean posterior
-    else:
-        posterior_position_subset_array = np.array(posterior_position_subset).T
-        posterior_position_subset_array = posterior_position_subset_array/np.sum(posterior_position_subset_array, axis = 0)
-        max_posterior_position = np.matmul(position_axis,posterior_position_subset_array)
-
-    # find remote time
-    is_remote = np.logical_or(max_posterior_position > arm_top, max_posterior_position < arm_base)
-    is_remote_pd = pd.Series(is_remote, index = posterior_position_subset.time)
-    is_remote_segments = np.array(segment_boolean_series(
-            is_remote_pd, minimum_duration=0.020))
-    if len(is_remote_segments) == 0:
-        return [],[],[]
-
-    
-    time_intervals = []
-    arm_identity = []
-    trials = []
-    for i in range(is_remote_segments.shape[0]):
-        
-        (t0,t1) = is_remote_segments[i]
-        
-        # restrict to continuous state:
-        #    length of the continuous state should be greater than 20ms
-        decode_subset = select_subset_helper(decode,(t0,t1))
-        state_subset = np.array(decode_subset.causal_posterior.sum(dim='position'))
-        time=np.array(decode_subset.causal_posterior.time)
-        
-        snippets_conti = find_start_end(state_subset[:,0]>0.5) #continuous
-        snippets=[time[s] for s in snippets_conti if np.diff(time[s])[0]>0.020]
-        
-        #assert 1 == 0
-        for s in range(len(snippets)):
-            # overall sum of decode posterior in the max posterior arm should be greater than 0.2
-            posterior_by_arm = position_posterior2arm_posterior(
-                select_subset_helper(posterior_position_subset,snippets[s]),
-                linear_map)
-            
-            # the max posterior arm
-            (t0_peak,t1_peak) = snippets[s]
-            subset_ind = (posterior_position_subset.time >= t0_peak) & (posterior_position_subset.time <= t1_peak)
-            subset_arm_snippet = linear2arm(max_posterior_position[subset_ind])
-            # if a decode goes to home arm, it will not classified
-            subset_arm_snippet = subset_arm_snippet[~np.isnan(subset_arm_snippet)]
-            # exclude
-            subset_arm_snippet = np.setdiff1d(subset_arm_snippet,subset_arm)
-            
-            if len(subset_arm_snippet) == 0 or len(subset_arm_snippet) > 1:
-                # the latter scenario is unclear situation, ignore
-                continue
-
-            max_arm_ind = int(np.unique(subset_arm_snippet) - 5)
-    
-            if np.mean(posterior_by_arm[max_arm_ind,:]) < 0.2:
-                continue
-            
-            time_intervals.append(snippets[s])
-            arm_identity.append(max_arm_ind)
-            trials.append(add_trial(t0_peak,log_df))
-    return trials, time_intervals, arm_identity
-
-def turnaround_triggered_remote_decode(triggered_position,triggered_position_abs,
-                                decode,log_df,linear_position_info,position_info,max_flag = 1,home = False,
-                                minimum_duration = 0.05): # in seconds
-    """
-    if home = 1: find remote representation at home arm during running instead of at outer well.
-    
-    # 1. find time points out side of arm position
-    # 2. for each time interval, find arm
-    #   decode should pass certain criteria:
-    #   (a) be continuous in decoder state
-    #   (b) posterior >= threshold%
-    # 3. return for each trial a list of time range and arm identity for the decode
-
-    INPUT: decode should be the absolute
-    """
-    # segment only: consider posterior in that arm only
-    
-    position_axis = np.array(decode.coords['position'])
-        
-    # infer the turn around time
-    t = np.array(triggered_position_abs.index)[np.argmin(np.abs(triggered_position.index-0))]
-    
-    # find the arm the animal is at: select subset of decode
-    (t0,t1) = (triggered_position_abs.index[0]-0.0001,triggered_position_abs.index[-1]+0.0001)
-    # add a little for floating point
-        
-    # find the arm the animal is at
-    (t0_peak,t1_peak) = (t-0.001, t+0.001)
-    subset_ind = (linear_position_info.index >= t0_peak) & (linear_position_info.index <= t1_peak)
-    subset_linear = linear_position_info.loc[subset_ind]
-    subset_arm = np.unique(subset_linear.track_segment_id)
-
-    if home:
-        # find the trial
-        trialID = add_trial(t,log_df)
-        t_home = log_df.loc[trialID,"timestamp_H"]
-
-        if np.isnan(t_home):
-            return [],[],[]
-        
-        (t0,t1) = (t_home,t)
-        # rough set
-        linear_pos_subset = select_subset_helper_pd(linear_position_info,(t0,t1))
-        
-        # stricter
-        t1 = linear_pos_subset[np.array(linear_pos_subset.track_segment_id) >= 6].index[0]
-        linear_pos_subset = select_subset_helper_pd(linear_position_info,(t0,t1))
-        
-        
-    decode_subset = select_subset_helper(decode,(t0,t1))      
-    posterior_position_subset = decode_subset.acausal_posterior.sum(dim='state')
-    
-    # get max posterior
-    if max_flag:
-        max_posterior_position = np.array(position_axis[posterior_position_subset.argmax(dim = 'position')])
-
-    # get mean posterior
-    else:
-        posterior_position_subset_array = np.array(posterior_position_subset).T
-        posterior_position_subset_array = posterior_position_subset_array/np.sum(posterior_position_subset_array, axis = 0)
-        max_posterior_position = np.matmul(position_axis,posterior_position_subset_array)
-
-    # find remote time
-    
-    
-    if home:
-        
-        if abs(len(linear_pos_subset) - len(max_posterior_position)) > 3:
-            print("skipped due to decode and camera time frame do not fully match.")
-            return [],[],[]
-        
-        #animal is physically at the non arm segment
-        #is_physically_at = np.array(linear_pos_subset.track_segment_id) < 6 # this simple criteria might include home well replay events
-        is_physically_at = np.logical_and(np.array(linear_pos_subset.linear_position) >= 10,
-                                          np.array(linear_pos_subset.linear_position) <= linear_map[1][1])
+            epoch_num = int(session_name[:2])
                 
-        is_remote = np.zeros_like(max_posterior_position)
-        #just to initialize, it calculates whether CA1 decoded representation is remote
-        
+            # log
+            key={'nwb_file_name':nwb_copy_file_name,'epoch':epoch_num,'proportion': proportion}
+            print(ChangeofMind & key)
+            log = ChangeofMind().fetch1_dataframe(key)
+            session_name = (TrialChoice & key).fetch1('epoch_name')
 
-        min_len = np.min([len(is_physically_at),len(is_remote)])
-        is_physically_at = is_physically_at[:min_len]
-        is_remote = is_remote[:min_len]
-            
-        for k in region.keys():
-            if k == int(subset_arm):
-                continue
-            (arm_base, arm_top) = region[k]
-            is_remote = is_remote + np.logical_and(max_posterior_position <= arm_top, max_posterior_position >= arm_base)
-        is_remote = np.logical_and(is_physically_at,is_remote)
-    else:
-        is_remote = np.zeros_like(max_posterior_position) #just to initialize
-        # find representation in other arms
-        for k in region.keys():
-            if k == int(subset_arm):
-                continue
-            (arm_base, arm_top) = region[k]
-            is_remote = is_remote + np.logical_and(max_posterior_position <= arm_top, max_posterior_position >= arm_base)
-        #is_remote = np.logical_or(max_posterior_position > arm_top, max_posterior_position < arm_base)
+            event_indices_session = [ind for ind in range(len(trial_info)) if trial_info[ind][1]==session_name and trial_info[ind][0][5:13]==day]
+            for event_index in event_indices_session:
+                print(f"working on event_index{event_index}")
+                
+                trialID = trial_info[event_index][2]
+                initial_choice = int(log.loc[trialID,'initial_choice'])
+                # cross check
+                assert initial_choice== int(trial_info[event_index][-1])
+                
+                # do not consider trials in which the final choice is the same as the initial choice
+                final_choice = int(log.loc[trialID,'OuterWellIndex'])
+                if final_choice == initial_choice:
+                    continue
+                
+                # do not consider trials with more than 1 change of mind
+                if log.loc[trialID,'CoMNum_by_arm'] > 1:
+                    continue
+                
+                event_indices.append(event_index)
+                initial_arms.append(initial_choice)
+                chosen_arms.append(final_choice)
     
+    # for each remote event, classify whether it is to the chosen arm
+    posterior_chosen = []
+    posterior_unchosen = []
     
-    # restrict to moving time
-    pos_subset = select_subset_helper_pd(position_info,(t0,t1))  
-    is_moving = np.array(pos_subset.head_speed) > 4
-    min_len = np.min([len(is_moving),len(is_remote)])
-    # choose min because one variable is a subset of decode and the other is a subset of position.
-    # there could be 1 or 2 time point difference.
-    is_moving = is_moving[:min_len]
-    is_remote = is_remote[:min_len]
-    
-    is_remote = np.logical_and(is_remote, is_moving)
-    
-    is_remote_pd = pd.Series(is_remote, index = posterior_position_subset.time)
-    is_remote_segments = np.array(segment_boolean_series(
-            is_remote_pd, minimum_duration=minimum_duration))
+    for trial_ind in range(len(chosen_arms)):
+        # zero out initial arm
+        initial_arm = initial_arms[trial_ind] - 1
+        posterior_others = posterior_by_arm[event_indices[trial_ind],:]
         
-    if len(is_remote_segments) == 0:
-        return [],[],[]
-    
-    for i in range(is_remote_segments.shape[0]):
+        # re-normalize the rest
+        if normalized:
+            posterior_others[initial_arm] = 0
+            posterior_others = posterior_others/np.sum(posterior_others)
         
-        (t0,t1) = is_remote_segments[i]
-
-    time_intervals = []
-    arm_identity = []
-    trials = []
-    for i in range(is_remote_segments.shape[0]):
+        posterior_chosen.append(posterior_others[chosen_arms[trial_ind]-1])
         
-        (t0,t1) = is_remote_segments[i]
+        ind_not_chosen = np.setdiff1d([1,2,3,4],[chosen_arms[trial_ind], initial_arms[trial_ind]])-1
         
-        # restrict to continuous state:
-        #    length of the continuous state should be greater than 15ms
-        decode_subset = select_subset_helper(decode,(t0,t1))
-        state_subset = np.array(decode_subset.causal_posterior.sum(dim='position'))
-        time=np.array(decode_subset.causal_posterior.time)
-        
-        snippets_conti = find_start_end(state_subset[:,0]>0.5) #continuous
-        snippets=[time[s] for s in snippets_conti if np.diff(time[s])[0]>0.02]
-        
-        for s in range(len(snippets)):
-
-            # overall sum of decode posterior in the max posterior arm should be greater than 0.2
-            posterior_by_arm = position_posterior2arm_posterior(
-                select_subset_helper(posterior_position_subset,snippets[s]),
-                linear_map)
+        posterior_unchosen.append(posterior_others[ind_not_chosen])
+                
+    return posterior_chosen, posterior_unchosen, event_indices
             
-            # the max posterior arm
-            (t0_peak,t1_peak) = snippets[s]
-            subset_ind = (posterior_position_subset.time >= t0_peak) & (posterior_position_subset.time <= t1_peak)
-            subset_arm_snippet = linear2arm(max_posterior_position[subset_ind])
-            
-            # if a decode goes to home arm, it will not classified
-            subset_arm_snippet = np.unique(subset_arm_snippet[~np.isnan(subset_arm_snippet)])
-            
-            # exclude
-            #subset_arm_snippet = np.setdiff1d(subset_arm_snippet,subset_arm)
-            
-            if len(subset_arm_snippet) == 0 or len(subset_arm_snippet) > 1:
-                # the latter scenario is unclear situation, ignore
-                continue
-
-            max_arm_ind = int(np.unique(subset_arm_snippet) - 5)
-    
-            if np.mean(posterior_by_arm[max_arm_ind,:]) < 0.2:
-                continue
-            
-            time_intervals.append(snippets[s])
-            arm_identity.append(max_arm_ind)
-            trials.append(add_trial(t0_peak,log_df))
-    return trials, time_intervals, arm_identity
-            
-def linear2arm(position):
-    arm = np.zeros_like(position) + np.nan
-    for p_ind in range(len(position)):
-        p = position[p_ind]
-        for k in region.keys():
-            if p>=region[k][0] and p<region[k][1]:
-                arm[p_ind] = k
-                continue
-    return arm
-
-def add_trial(t0,log_df):
-    trial_ind=np.array(log_df.index)
-    trial_number = trial_ind[np.argwhere((np.array(log_df.timestamp_O[:-1])-t0) > 0).ravel()[0]]
-    return trial_number
     
                     
 def do_GLM(animal, day_sessions, trials, arm_identities, time_intervals):
@@ -555,7 +488,7 @@ def do_GLM(animal, day_sessions, trials, arm_identities, time_intervals):
     
     return model1, model2, model3
 
-def do_GLM_subprocess(GLM_entries1, constant = True):
+def do_GLM_subprocess(GLM_entries1, constant = True, simple_linear = False):
     model1 = {}
     x = GLM_entries1[:,:-1]
     if constant:
@@ -567,7 +500,10 @@ def do_GLM_subprocess(GLM_entries1, constant = True):
     model1['y'] = y
 
     #glm_poisson1 = sm.GLM(y,x_,family=sm.families.Poisson())
-    glm_poisson1 = sm.GLM(y, x_, family = sm.families.Binomial())
+    if simple_linear:
+        glm_poisson1 = sm.GLM(y, x_, family = sm.families.Gaussian())
+    else:
+        glm_poisson1 = sm.GLM(y, x_, family = sm.families.Binomial())
     res1 = glm_poisson1.fit()
     model1['fit'] = res1
     model1['CI'] = res1.conf_int(alpha=0.05)

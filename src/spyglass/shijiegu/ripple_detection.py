@@ -250,7 +250,9 @@ def loadRippleLFP(nwb_copy_file_name,
     animal_name = nwb_copy_file_name[:5]
     key = {'nwb_file_name': nwb_copy_file_name,
            'target_interval_list_name': interval_list_name,
+           "artifact_params_name":"ampl_100_prop_05_2ms",
            'filter_name': 'Ripple 150-250 Hz'}
+    
     if fieldname == "filtered data" or (animal_name == "eliot"):
         ripple_nwb_file_name = (LFPBand & key).fetch1('analysis_file_name')
     else:

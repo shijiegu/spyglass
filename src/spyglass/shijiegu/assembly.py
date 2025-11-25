@@ -22,15 +22,16 @@ def get_bins_ripple(nwb_copy_file_name, session_name,
         ripple_times = pd.DataFrame((RippleTimesWithDecode & 
                                      {'nwb_file_name': nwb_copy_file_name, 'interval_list_name': session_name}).fetch1('ripple_times'))
     except:
-        ripple_times = pd.read_pickle((RippleTimesWithDecode & 
-                                       {'nwb_file_name': nwb_copy_file_name,
-                                        'interval_list_name': session_name,
-                                       	'decode_threshold_method': 'MUA_0SD'}).fetch1('ripple_times'))
-    else:
-        ripple_times = pd.read_pickle((RippleTimesWithDecode & 
-                                       {'nwb_file_name': nwb_copy_file_name,
-                                        'interval_list_name': session_name,
-                                       	'decode_threshold_method': 'MUA_M05SD'}).fetch1('ripple_times'))
+        if nwb_copy_file_name[:5] == "lewis":
+            ripple_times = pd.read_pickle((RippleTimesWithDecode & 
+                                           {'nwb_file_name': nwb_copy_file_name,
+                                            'interval_list_name': session_name,
+                                           	'decode_threshold_method': 'MUA_M05SD'}).fetch1('ripple_times'))
+        else:
+            ripple_times = pd.read_pickle((RippleTimesWithDecode & 
+                                           {'nwb_file_name': nwb_copy_file_name,
+                                            'interval_list_name': session_name,
+                                           	'decode_threshold_method': 'MUA_0SD'}).fetch1('ripple_times'))
         
     
     intervals, index = find_SWR_time(ripple_times, cont = 1-fragmented, return_index = True)

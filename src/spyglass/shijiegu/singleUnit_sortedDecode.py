@@ -71,7 +71,7 @@ def color_cells_by_place_direction(cells, placefield_peak, spike_count_by_arm_di
     cell_color = {}
     for cell in cells:
         # first find its peak arm
-        cell_color[cell] = 'k'
+        cell_color[cell] = 'crimson'
         arm = find_peak_arm(cell,cell_list_by_arm)
         if np.isnan(arm):
             pass
@@ -122,7 +122,7 @@ def place_field_direction(nwb_copy_file_name,session_name,position_name,curation
                                                                             session_name, position_name,
                                                                             sort_group_id, u,
                                                                             BINWIDTH = 2, sigma = 2,
-                                                                            curation_id = 1,
+                                                                            curation_id = curation_id, #1,
                                                                             nwb_units = nwb_units_all[sort_group_id].loc[[u]])
                     
             # track time spike count

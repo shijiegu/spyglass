@@ -633,7 +633,12 @@ def behavior_transitions(animal,dates_to_plot,datafolder = '/cumulus/shijie/beha
     data_pair2=pickle.load(open(os.path.join(datafolder,animal,'behavior_metaPairwise_'+animal+'.p'), "rb"))
 
     dates = data_pair2['dates']
+    
     P_behavior_all = data_pair2['P_behavior_all']
+    P_behavior_all_subset = {}
+    for d in dates_to_plot:
+        P_behavior_all_subset[d] = P_behavior_all[d]
+        
     xcorr = data_pair2['xcorr']
     xcorr25_ = data_pair2['xcorr25']
     xcorr975_ = data_pair2['xcorr975']
@@ -657,4 +662,4 @@ def behavior_transitions(animal,dates_to_plot,datafolder = '/cumulus/shijie/beha
     xcorr25_plot = np.array(xcorr25_plot)
     xcorr975_plot = np.array(xcorr975_plot)
 
-    return P_behavior_all,xcorr_plot,xcorr25_plot,xcorr975_plot
+    return P_behavior_all_subset,xcorr_plot,xcorr25_plot,xcorr975_plot

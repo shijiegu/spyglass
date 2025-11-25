@@ -2,6 +2,7 @@ import spyglass as nd
 import pandas as pd
 import numpy as np
 import xarray as xr
+import random
 from scipy import stats
 from scipy import linalg
 from scipy import ndimage
@@ -16,14 +17,12 @@ from spyglass.common.common_position import IntervalPositionInfo, RawPosition, I
 
 from ripple_detection.core import segment_boolean_series
 
-from spyglass.shijiegu.Analysis_SGU import TrialChoice,EpochPos,MUA,get_linearization_map,TrialChoiceChangeofMind
+from spyglass.shijiegu.Analysis_SGU import TrialChoice,EpochPos,MUA,get_linearization_map,ChangeofMind
 from spyglass.shijiegu.decodeHelpers import runSessionNames
 from spyglass.shijiegu.ripple_add_replay import plot_decode_spiking,select_subset_helper,select_subset_helper_pd
-from spyglass.shijiegu.changeOfMind import (find_turnaround_time, findProportion,
-            find_trials, normalize, load_epoch_data_wrapper, find_direction, find_trials_animal)
-from spyglass.shijiegu.changeOfMindRipple import triggered_ripple_animal
 from spyglass.shijiegu.load import load_decode
 from spyglass.shijiegu.pairwiseDecode import behavior_transitions_count
+from spyglass.shijiegu.changeOfMind_helper import findProportion
 
 # in the linearized track, segment 0 correspond to home, 1 to platform etc.
 labels={}
@@ -50,6 +49,12 @@ region[6] = linear_map[3]
 region[7] = linear_map[5]
 region[8] = linear_map[7]
 region[9] = linear_map[9]
+
+wellregion={}
+wellregion[6] = np.array( [(linear_map[3][0]+linear_map[3][1])/2, linear_map[3][1] ])
+wellregion[7] = np.array( [(linear_map[5][0]+linear_map[5][1])/2, linear_map[5][1] ])
+wellregion[8] = np.array( [(linear_map[7][0]+linear_map[7][1])/2, linear_map[7][1] ])
+wellregion[9] = np.array( [(linear_map[9][0]+linear_map[9][1])/2, linear_map[9][1] ])
 
 vectors = {}
 for key in nodes.keys():
@@ -86,40 +91,87 @@ rev1[3] = 1
 rev1[1] = 4
 rev1[4] = 2
 
+def normalize(T_):
+    T=T_.copy()
+    for ti in range(4):
+        if np.sum(T[ti])!=0:
+            T[ti]=T[ti]/np.sum(T[ti])
+    return T
+
 def turnaround_triggered_position(t,linear_position_info,
-                                  delta_t_minus = 1,delta_t_plus = 1):
+                                  delta_t_minus = 1,delta_t_plus = 1,segment_only = True,
+                                  tmin = -np.inf,tmax = np.inf,
+                                  animal_location = None):
     # all time are in seconds
     # also return the arm the animal is in while change of mind
+    # animal_location: if we know where the animal, we can check that parsing is correct.
     
     # find the arm the animal is at
     (t0_peak,t1_peak) = (t-0.001, t+0.001)
     subset_ind = (linear_position_info.index >= t0_peak) & (linear_position_info.index <= t1_peak)
     subset_linear = linear_position_info.loc[subset_ind]
     subset_arm = np.unique(subset_linear.track_segment_id)
+    if animal_location is not None:
+        if int(subset_arm-5) != int(animal_location):
+            print(f"Warning: at time {t}, animal location {animal_location}, but parsing location {subset_arm}")
+            return None, None, None
+
     arm_base = region[int(subset_arm)][0]
 
     # select subset
     (t0,t1) = (t - delta_t_minus, t + delta_t_plus)
+    t0 = np.max([t0, tmin])
+    t1 = np.min([t1, tmax])
     subset_ind = ((linear_position_info.index >= t0) & (linear_position_info.index <= t1))
     subset_linear = linear_position_info.loc[subset_ind]
     
-    subset_ind2 = np.array(subset_linear.track_segment_id) == subset_arm
-    subset_linear = subset_linear.loc[subset_ind2]
+    if segment_only:
+        # because downstream analysis assumes some continuity,
+        # for example if the rat leaves the arm and comes back 1 second later,
+        # there will be 2 continuous intervals, we pick the interval that contains the turn around time t
+        subset_ind2 = np.array(subset_linear.track_segment_id) == subset_arm
+        
+        diff = pd.Series(subset_ind2, index = subset_linear.index)
+        intervals = segment_boolean_series(diff, minimum_duration=0.2)
+        if len(intervals) == 0:
+            return None, None, None
 
-    peak_index = np.argwhere(subset_linear.index >= t).ravel()[0]
-    y0 = subset_linear.iloc[peak_index].linear_position
+        # pick the interval rat is in
+        interval_flag = np.argwhere([True if interval[0]<=t and interval[1]>=t else False for interval in intervals]).ravel()
+        if len(interval_flag) == 0:
+            return None, None, None
+        interval = intervals[int(interval_flag)]
+        subset_ind = ((subset_linear.index >= interval[0]) & (subset_linear.index <= interval[1]))
+        subset_linear = subset_linear.loc[subset_ind]
 
-    triggered_position = pd.Series(np.array(subset_linear.linear_position) - y0,
-                                   index = subset_linear.index - t)
-    triggered_position_abs = pd.Series(np.array(subset_linear.linear_position) - arm_base, 
-                                       #with the base of the arm removed
-                                   index = subset_linear.index)
+        peak_index = np.nanargmin(np.abs(subset_linear.index - t)) #np.nanargmin(subset_linear.index - t)
+        y0 = subset_linear.iloc[peak_index].linear_position
+
+        triggered_position = pd.Series(np.array(subset_linear.linear_position) - y0,
+                                    index = subset_linear.index - t)
+        triggered_position_base_subtracted = pd.Series(np.array(subset_linear.linear_position) - arm_base, 
+                                        #with the base of the arm removed
+                                    index = subset_linear.index)
+    else:
+        triggered_position = pd.Series(np.array(subset_linear.linear_position),
+                                    index = subset_linear.index - t)
+        triggered_position_base_subtracted = pd.Series(np.array(subset_linear.linear_position), 
+                                        #with the base of the arm removed
+                                    index = subset_linear.index)
+        
     
-    return triggered_position, triggered_position_abs, subset_arm[0] - 5
+    return triggered_position, triggered_position_base_subtracted, subset_arm[0] - 5
 
 def turnaround_triggered_decode(triggered_position,triggered_position_abs,
                                 decode,linear_position_info,max_flag = 1,segment_only = False):
     # segment only: consider posterior in that arm only
+    """
+    Returns:
+        triggered_decode: position has animal location at CoM subtracted, time has time at CoM subtracted
+        triggered_decode_base_subtracted: position has arm base of the CoM arm subtracted, time has no subtraction
+        triggered_decode_abs: no subtraction at all
+
+    """
     
     position_axis = np.array(decode.coords['position'])
         
@@ -145,37 +197,29 @@ def turnaround_triggered_decode(triggered_position,triggered_position_abs,
     arm_base = region[int(subset_arm)][0]
     
     if segment_only:
-        # find the arm the animal is at
-        (t0_peak,t1_peak) = (t-0.001, t+0.001)
-        subset_ind = (linear_position_info.index >= t0_peak) & (linear_position_info.index <= t1_peak)
-        subset_linear = linear_position_info.loc[subset_ind]
-        subset_arm = int(np.unique(subset_linear.track_segment_id))
-        posterior_position_subset = select_subset_helper_position(posterior_position_subset,region[subset_arm])
-
+        posterior_position_subset = select_subset_helper_position(posterior_position_subset,region[int(subset_arm)])
+        position_axis = np.array(posterior_position_subset.coords['position'])
+        posterior_position_subset_array = np.array(posterior_position_subset).T
+        invalid_ind = np.sum(posterior_position_subset_array, axis = 0) <= 0.2  # restirct to times with more than 50% posterior in the arm.
+        
     # get max posterior
     if max_flag:
         max_posterior_position = np.array(position_axis[posterior_position_subset.argmax(dim = 'position')])
-
     # get mean posterior
     else:
         posterior_position_subset_array = np.array(posterior_position_subset).T
-        if segment_only: # restirct to times with more than 50% posterior in the arm.
-            invalid_ind = np.sum(posterior_position_subset_array, axis = 0) <= 0.5
         posterior_position_subset_array = posterior_position_subset_array/np.sum(posterior_position_subset_array, axis = 0)
-        if segment_only:
-            position_axis_ = np.array(posterior_position_subset.coords['position'])
-            max_posterior_position = np.matmul(position_axis_,posterior_position_subset_array)
-            max_posterior_position[invalid_ind] = np.nan
-        else:
-            max_posterior_position = np.matmul(position_axis,posterior_position_subset_array)
+        max_posterior_position = np.matmul(position_axis,posterior_position_subset_array)
+        
+    if segment_only:
+        max_posterior_position[invalid_ind] = np.nan
 
     # find the decode position at turning around
     try:
         t0_ind = np.argwhere(np.array(decode_subset.time >= (t-0.0001))).ravel()[0] # add a little float point for stability
         y0 = max_posterior_position[t0_ind]
     except:
-        y0 = max_posterior_position[-1]
-    #print(y0)
+        return None, None, None
 
     triggered_decode = pd.Series(max_posterior_position - y0,
                                  index = np.array(posterior_position_subset.time) - t)
@@ -223,11 +267,11 @@ def turnaround_triggered_speed(triggered_position_abs,triggered_position,df):
 
 def find_triggered_animal(animal,list_of_days,delta_t_minus = 1,delta_t_plus = 1,
                           max_flag = False, segment_only = False,
-                          nearby = False, # use nearby trial's outbound or inbound
+                          control = False, # use nearby trial's outbound or inbound
                           proportion = 0.1, 
-                          multiple_CoM = False, single_CoM = False, first_CoM = False, last_CoM = False):
+                          multiple_CoM = False, single_CoM = False, first_CoM = True, last_CoM = False):
     triggered_positions = []
-    triggered_positions_abs = [] #absolute time
+    triggered_positions_baseoff = [] #absolute time
     triggered_decodes = []
     triggered_decodes_baseoff = []
     triggered_decodes_abs = [] #absolute time
@@ -243,12 +287,12 @@ def find_triggered_animal(animal,list_of_days,delta_t_minus = 1,delta_t_plus = 1
             session_name = session_interval[ind]
             position_name = position_interval[ind]
             
-            (positions, positions_abs,
+            (positions, positions_baseoff,
              decodes, decodes_baseoff, decodes_abs,
              day_session_trial) = find_triggered_session(nwb_copy_file_name,
                                                             session_name, position_name,
                                                             delta_t_minus, delta_t_plus,
-                                                            max_flag, segment_only, nearby = nearby,
+                                                            max_flag, segment_only, nearby = control,
                                                             proportion = proportion,
                                                             multiple_CoM = multiple_CoM,
                                                             single_CoM = single_CoM,
@@ -256,8 +300,8 @@ def find_triggered_animal(animal,list_of_days,delta_t_minus = 1,delta_t_plus = 1
                                                             last_CoM = last_CoM)
             for position in positions:
                 triggered_positions.append(position)
-            for position in positions_abs:
-                triggered_positions_abs.append(position)
+            for position in positions_baseoff:
+                triggered_positions_baseoff.append(position)
             for decode in decodes:
                 triggered_decodes.append(decode)
             for decode in decodes_abs:
@@ -268,40 +312,10 @@ def find_triggered_animal(animal,list_of_days,delta_t_minus = 1,delta_t_plus = 1
                 triggered_day_session_trial.append(d)
                 
         
-    return (triggered_positions, triggered_positions_abs,
+    return (triggered_positions, triggered_positions_baseoff,
             triggered_decodes, triggered_decodes_baseoff, triggered_decodes_abs,
             triggered_day_session_trial)
     
-def find_triggered_mua_animal(animal,list_of_days,proportion_threshold = 0.1,delta_t_minus = 1,delta_t_plus = 1,
-                          nearby = False # use nearby trial's outbound or inbound
-                          ):
-    triggered_mua = []
-    triggered_positioninfo = [] #absolute timee time
-    triggered_day_session_trial = []
-    
-    for day in list_of_days:
-        nwb_file_name = animal.lower() + day + '.nwb'
-        nwb_copy_file_name = get_nwb_copy_filename(nwb_file_name)
-        session_interval, position_interval = runSessionNames(nwb_copy_file_name)
-        for ind in range(len(session_interval)):
-            session_name = session_interval[ind]
-            position_name = position_interval[ind]
-            
-            (muas,
-             speeds,
-             day_session_trials) = find_triggered_mua_session(
-                 nwb_copy_file_name,session_name,position_name,
-                 delta_t_minus,delta_t_plus,
-                 proportion_threshold = proportion_threshold,nearby = nearby)
-            for mua in muas:
-                triggered_mua.append(mua)
-            for speed in speeds:
-                triggered_positioninfo.append(speed)
-            for day_session_trial in day_session_trials:
-                triggered_day_session_trial.append(day_session_trial)              
-        
-    return (triggered_mua, triggered_positioninfo,
-            triggered_day_session_trial)
     
 def find_triggered_mua_session(nwb_copy_file_name,session_name,position_name,delta_t_minus,delta_t_plus,
                                proportion_threshold,nearby):
@@ -326,8 +340,10 @@ def find_triggered_mua_session(nwb_copy_file_name,session_name,position_name,del
         "proportion":str(proportion_threshold)}).fetch1("change_of_mind_info") )
     
     rowID, turnaround_times = return_change_of_mind_times_from_log(log_df, nearby,
-                                                                   multiple_CoM = False, single_CoM = False,
-                                                                   first_CoM = True, last_CoM = False)
+                                                                   multiple_CoM = False,
+                                                                   single_CoM = False,
+                                                                   first_CoM = True, 
+                                                                   last_CoM = False)
     # where we will look at all trials with Change of Mind occurances (multiple_CoM = False, single_CoM = False),
     # instead of looking at those trials with only one Change of Mind occurance.
     # we will look at only the first Change of mind time.
@@ -340,24 +356,38 @@ def find_triggered_mua_session(nwb_copy_file_name,session_name,position_name,del
     
     # 4. triggered position traces
     triggered_positions = []
-    triggered_positions_abs = [] #absolute time
+    triggered_positions_baseoff = [] #absolute time, with the base of the change of mind arm subtracted.
     day_session_trial = []
 
     for trial_ind in range(len(rowID)):
         trial = rowID[trial_ind]
         ts = turnaround_times[trial_ind]
+        tmin = log_df.loc[trial,'timestamp_H']
+        if np.isnan(tmin):
+            tmin = log_df.loc[trial,'timestamp_O'] - 2
+        tmax = log_df.loc[trial,'timestamp_O'] + 2
         
         # problemetic session/trials
         # remember to do this in line 513
         if (nwb_copy_file_name == "lewis20240113_.nwb" and 
             session_name == "02_Rev2Session1") and trial == 49:
             continue
+            
+        if nearby:
+            animal_location = log_df.loc[trial,'OuterWellIndex']
+        else:
+            animal_location = None
         
         for t in ts:
-            triggered_position, triggered_position_abs, arm = turnaround_triggered_position(t,linear_position_info,
-                                                                                       delta_t_minus,delta_t_plus)
+            triggered_position, triggered_position_baseoff, arm = turnaround_triggered_position(t,linear_position_info,
+                                                                                       delta_t_minus,
+                                                                                       delta_t_plus,
+                                                                                       tmin,tmax,
+                                                                                       animal_location = animal_location)
+            if triggered_position is None:
+                continue
             triggered_positions.append(triggered_position)
-            triggered_positions_abs.append(triggered_position_abs)
+            triggered_positions_baseoff.append(triggered_position_baseoff)
             day_session_trial.append((nwb_copy_file_name,session_name,trial,arm))
     
     # 5. triggered decode traces
@@ -365,10 +395,10 @@ def find_triggered_mua_session(nwb_copy_file_name,session_name,position_name,del
     triggered_speeds = []
     for ind in range(len(triggered_positions)):
         triggered_position = triggered_positions[ind]
-        triggered_position_abs = triggered_positions_abs[ind]
-        triggered_mua = turnaround_triggered_mua(triggered_position_abs,
+        triggered_position_baseoff = triggered_positions_baseoff[ind]
+        triggered_mua = turnaround_triggered_mua(triggered_position_baseoff,
                                                  triggered_position,mua_xr,mean,sd)
-        triggered_speed = turnaround_triggered_speed(triggered_position_abs,
+        triggered_speed = turnaround_triggered_speed(triggered_position_baseoff,
                                                  triggered_position,position_info)
         
         triggered_muas.append(triggered_mua)
@@ -376,80 +406,79 @@ def find_triggered_mua_session(nwb_copy_file_name,session_name,position_name,del
     return triggered_muas, triggered_speeds, day_session_trial  #triggered_positions, triggered_positions_abs
     
 def find_multiple_CoM_trials(log_df):
-    rowID = []
-    for t in log_df.index[:-2]:
-        if not log_df.loc[t,'change_of_mind']:
-            continue
-            
-        CoM_time = np.array(log_df.loc[t,"CoM_t"][0])
-            
-        CoM_arm = np.array(log_df.loc[t,"CoM_arm"][0])
-        CoM_arm = CoM_arm[CoM_arm > 0]
-            
-        if len(CoM_time) > 1 and len(CoM_arm) > 2:
-            rowID.append(t)
-    return rowID
+    return log_df[log_df.CoMNum_by_arm > 1].index
 
 def find_single_CoM_trials(log_df):
-    rowID = []
-    for t in log_df.index[:-2]:
-        if not log_df.loc[t,'change_of_mind']:
-            continue
-            
-        CoM_time = np.array(log_df.loc[t,"CoM_t"][0])
-            
-        CoM_arm = np.array(log_df.loc[t,"CoM_arm"][0])
-        CoM_arm = CoM_arm[CoM_arm > 0]
-            
-        if len(CoM_time) == 1 and len(CoM_arm) <= 2:
-            rowID.append(t)
-    return rowID
+    return log_df[log_df.CoMNum_by_arm == 1].index
 
-def return_change_of_mind_times_from_log(log_df, nearby = False, multiple_CoM = False, single_CoM = False, first_CoM = False, last_CoM = False):
-    if multiple_CoM:
+def find_any_CoM_trials(log_df):
+    return log_df[log_df.change_of_mind].index
+
+def find_turnaround_times_trial(trialID, log_df, linear_position_df):
+    # find turn around times
+    camera_frequency = 1/np.mean(np.diff(linear_position_df.index))
+
+    # for each trial
+    start = log_df.loc[trialID,'timestamp_H']
+    end = log_df.loc[trialID,'timestamp_O']
+
+    # restrict to this trial's position info
+    trialInd = (linear_position_df.index >= start) &(linear_position_df.index <= end)
+    trialPosInfo = linear_position_df.loc[trialInd,:]
+    trialPosInfo = trialPosInfo.tail(int(120*camera_frequency)) #use at most xx seconds prior to nose poke at the outer well.
+    proportion, track_segment_id, max_proportion, turnaround_time = findProportion(trialPosInfo, camera_frequency)
+    return turnaround_time
+
+def return_change_of_mind_times_from_log(log_df, linear_position_info, nearby = False,
+                                         multiple_CoM = False, single_CoM = False,
+                                         first_CoM = True, last_CoM = False, subset_trials = None, home_ripple = False):
+    if multiple_CoM and not single_CoM:
         rowID = find_multiple_CoM_trials(log_df)
-        turnaround_times = np.array(log_df.loc[rowID,'CoM_t'])
-    elif single_CoM:
+        turnaround_times = [find_turnaround_times_trial(r, log_df, linear_position_info) for r in rowID]
+    elif single_CoM and not multiple_CoM:
         rowID = find_single_CoM_trials(log_df)
-        turnaround_times = np.array(log_df.loc[rowID,'CoM_t'])
-    else:
+        turnaround_times = np.array(log_df.loc[rowID,'initial_time'])
+        turnaround_times = [[t] for t in turnaround_times]
+    elif single_CoM and multiple_CoM:
         rowID = np.array(log_df[log_df.change_of_mind].index)
-        turnaround_times = np.array(log_df[log_df.change_of_mind].CoM_t)
-        turnaround_times_ind = np.array([ind for ind in np.arange(len(turnaround_times)) if len(turnaround_times[ind][0]) > 0])
-        if len(turnaround_times_ind) > 0:
-            rowID = rowID[turnaround_times_ind]
-            turnaround_times = turnaround_times[turnaround_times_ind]
-        else:
-            rowID = []
-            turnaround_times = []
-    turnaround_times = [tt[0] for tt in turnaround_times]
-    print("\n turnaround_times 1",turnaround_times)
+        turnaround_times = [find_turnaround_times_trial(r, log_df, linear_position_info) for r in rowID]
+        
     if first_CoM:
-        turnaround_times = [[tt[0]] for tt in turnaround_times]
-    print("\n turnaround_times 2",turnaround_times)
-    if multiple_CoM and last_CoM:
-        turnaround_times = [[tt[-1]] for tt in turnaround_times]
+        rowID = np.array(log_df[log_df.change_of_mind].index)
+        turnaround_times = [[log_df.loc[r,'initial_time']] for r in rowID]
         
+    if subset_trials == "nonrewarded":
+        subset_trials = log_df[log_df.rewardNum == 1].index
+    elif subset_trials == "rewarded":
+        subset_trials = log_df[log_df.rewardNum == 2].index
         
+    if home_ripple and nearby:
+        # if we are looking at home ripples, we want to look at the home well after the trials.
+        subset_trials = subset_trials + 1
+
+    
     if nearby:
         # figure out nearby trials
         rowID_ = []
         turnaround_times_ = []
         for r in rowID:
-            for r_ in [r - 1, r + 1, r + 2, r - 2, r + 3, r - 3]:
-                condition1 = np.isin(r_,np.array(log_df.index[:-1]))
-                condition2 = ~np.isin(r_,np.array(rowID))
-                if condition1 and condition2:
-                    break
+            r_ = return_a_nearby_random_trial(r, rowID,
+                                              min_trial = 1, max_trial = len(log_df) - 1,
+                                              subset_trials = subset_trials)
+
+            if np.isnan(r_):
+                continue
             rowID_.append(r_)
         
         # figure out turnaround_times
         for r in rowID_:
-            turnaround_times_.append([log_df.loc[r].timestamp_O - 0.2])
-    
-        rowID = rowID_
-        turnaround_times = turnaround_times_
-    return rowID, turnaround_times
+            turnaround_times_.append([log_df.loc[r].timestamp_O])
+        
+        print("nearby rowID", rowID_)
+        print("nearby turnaround_times", turnaround_times_)
+        return rowID_, turnaround_times_
+    else:
+        return rowID, turnaround_times
     
     
 
@@ -458,7 +487,7 @@ def find_triggered_session(
         delta_t_minus,delta_t_plus,
         max_flag,segment_only,nearby,
         proportion = 0.1,
-        multiple_CoM = False, single_CoM = False, first_CoM = False, last_CoM = False):
+        multiple_CoM = False, single_CoM = False, first_CoM = True, last_CoM = False):
     # if multiple_CoM is True, only plot trials with multiple change of mind.
     # This function returns "triggered decode", the function name is named poorly.
     # 
@@ -486,12 +515,16 @@ def find_triggered_session(
     # """if have not used TrialChoiceChangeofMind"""
     #rowID, trials, proportions, turnaround_times = find_trials(log_df,
     #                                                           linear_position_info, position_info, nearby = nearby)
-    log_df = pd.read_pickle( (TrialChoiceChangeofMind() & {
-        "nwb_file_name": nwb_copy_file_name,
+    q = {"nwb_file_name": nwb_copy_file_name,
         "epoch":int(session_name[:2]),
-        "proportion":str(proportion)}).fetch1("change_of_mind_info") )
+        "proportion":str(proportion)}
+    if len(ChangeofMind() & q) == 0:
+        print(f"No change of mind on session {nwb_copy_file_name}, epoch {session_name}.")
+        return [], [], [], [], [], []
     
-    rowID, turnaround_times = return_change_of_mind_times_from_log(log_df, nearby,
+    log_df = ChangeofMind().fetch1_dataframe(q)
+
+    rowID, turnaround_times = return_change_of_mind_times_from_log(log_df, linear_position_info, nearby,
                                                                    multiple_CoM, single_CoM,
                                                                    first_CoM, last_CoM)
     
@@ -501,46 +534,72 @@ def find_triggered_session(
         decode_options["encoding_set"] = '2Dheadspeed_above_4_andlowmua'
         decode_options["classifier_param_name"] = 'default_decoding_gpu_4armMaze'
         decode_options["decode_threshold_method"] = 'MUA_0SD'
-        decode_options["causal"] = False
+        decode_options["causal"] = True
     else:
         decode_options["encoding_set"] = '2Dheadspeed_above_4'
         decode_options["classifier_param_name"] = 'default_decoding_gpu_4armMaze'
         decode_options["decode_threshold_method"] = 'MUA_M05SD'
-        decode_options["causal"] = False
+        decode_options["causal"] = True
     
     decode = load_decode(nwb_copy_file_name,session_name,decode_options["classifier_param_name"],
                          decode_options["encoding_set"])
     
     # 4. triggered position traces
     triggered_positions = []
-    triggered_positions_abs = [] #absolute time
+    triggered_positions_baseoff = [] #absolute time
     day_session_trial = []
 
     for trial_ind in range(len(rowID)):
         trial = rowID[trial_ind]
         ts = turnaround_times[trial_ind]
+        tmin = log_df.loc[trial,'timestamp_H']
+        if np.isnan(tmin):
+            tmin = log_df.loc[trial,'timestamp_O'] - 2
+        tmax = log_df.loc[trial,'timestamp_O'] + 2
         
         # problemetic session/trials
         if (nwb_copy_file_name == "lewis20240113_.nwb" and 
             session_name == "02_Rev2Session1") and trial == 49:
             continue
+        if (nwb_copy_file_name == "lewis20240109_.nwb" and 
+            session_name == "08_Rev2Session4") and trial == 3: #tracking error
+            continue
         
-        for t in ts:
-            triggered_position, triggered_position_abs, arm = turnaround_triggered_position(t,linear_position_info,
-                                                                                       delta_t_minus,delta_t_plus)
+        if nearby:
+            animal_location = log_df.loc[trial,'OuterWellIndex']
+        else:
+            animal_location = None
+        
+        triggered_position_baseoff = None
+        for t_ind in range(len(ts)):
+            t = ts[t_ind]
+            if t_ind < len(ts) - 1:
+                tmax = np.min([tmax, ts[t_ind + 1]])
+            if triggered_position_baseoff is not None and len(triggered_position_baseoff) > 0:
+                tmin = np.max([tmin, triggered_position_baseoff.index[-1]])
+            triggered_position, triggered_position_baseoff, arm = turnaround_triggered_position(t,linear_position_info,
+                                                                                       delta_t_minus,delta_t_plus,
+                                                                                       segment_only,
+                                                                                       tmin,tmax,
+                                                                                       animal_location = animal_location)
+            if triggered_position is None or len(triggered_position) == 0:
+                continue
             triggered_positions.append(triggered_position)
-            triggered_positions_abs.append(triggered_position_abs)
+            triggered_positions_baseoff.append(triggered_position_baseoff)
             day_session_trial.append((nwb_copy_file_name,session_name,trial,arm))
         
     # 5. triggered decode traces
     triggered_decodes = []
     triggered_decodes_baseoff = []
     triggered_decodes_abs = [] #absolute time
+
     for ind in range(len(triggered_positions)):
+        
         triggered_position = triggered_positions[ind]
-        triggered_position_abs = triggered_positions_abs[ind]
+        triggered_position_baseoff = triggered_positions_baseoff[ind]
+        
         triggered_decode, triggered_decode_baseoff, triggered_decode_abs = turnaround_triggered_decode(triggered_position,
-                                                                            triggered_position_abs,
+                                                                            triggered_position_baseoff,
                                                                             decode,
                                                                             linear_position_info,
                                                                             max_flag = max_flag,
@@ -549,12 +608,12 @@ def find_triggered_session(
         triggered_decodes_baseoff.append(triggered_decode_baseoff)
         triggered_decodes_abs.append(triggered_decode_abs)
         
-    return triggered_positions, triggered_positions_abs, triggered_decodes, triggered_decodes_baseoff, triggered_decodes_abs, day_session_trial
+    return triggered_positions, triggered_positions_baseoff, triggered_decodes, triggered_decodes_baseoff, triggered_decodes_abs, day_session_trial
 
 def select_subset_helper_position(xr_ob,region):
+    ind = np.logical_and(xr_ob.position>=region[0],xr_ob.position<=region[1])
     xr_ob=xr_ob.sel(
-        position=xr_ob.position[
-            np.logical_and(xr_ob.position>=region[0],xr_ob.position<=region[1])])
+        position=xr_ob.position[ind])
     return xr_ob
 
 
@@ -609,54 +668,80 @@ def find_triggered_log_session(nwb_copy_file_name,session_name,position_name,
 
         
     # 2. load change of mind parsed result
-    log_df = pd.read_pickle( (TrialChoiceChangeofMind() & {
+    q = {
         "nwb_file_name": nwb_copy_file_name,
         "epoch":int(session_name[:2]),
-        "proportion":str(proportion)}).fetch1("change_of_mind_info") )
+        "proportion":str(proportion)}
+    log_df = ChangeofMind().fetch1_dataframe(q)
     rowID = np.array(log_df[log_df.change_of_mind].index)
         
     if len(rowID) == 0:
         return [],[]
     
     first_arm = []
-    for trialID in rowID:
-        first_arm.append(log_df.loc[trialID,"CoM_arm"][0][0])
-    
     return_tuple = []
+    #for trialID in rowID:
     for t_ind in range(len(rowID)):
         t = rowID[t_ind]
+        
+        initial_choice = log_df.loc[t,"initial_choice"]
+        if np.isnan(initial_choice):
+            continue
+        first_arm.append(initial_choice)
+    
         if trialinfo is not None:
-            if not np.isin(t,trialinfo):
+            if not np.isin(t,trialinfo): 
                 continue
         
         (t1,t2) = (t - back_trial, t + after_trial)
         if t1 < 1 or t2 > len(log_df) - 1:
             continue
-        return_tuple.append((t, int(first_arm[t_ind]), log_df.loc[t1:t2]))
+        return_tuple.append((t, int(initial_choice), log_df.loc[t1:t2]))
     
     # randomly choose trials before or after
     return_tuple_rand = []
     for t_ind in range(len(return_tuple)):
         t0 = return_tuple[t_ind][0]
-        candidate_trials = [t0-2, t0+2, t0-1, t0+1, t0-3, t0+3]
-        t0_rand = np.nan
-        for t in candidate_trials:
-            
-            condition1 = ~np.isin(t,rowID)
-            (t1,t2) = (t - back_trial, t + after_trial)
-            condition2 = t1 >= 1 and t2 <= len(log_df) - 1
-            
-            if condition1 and condition2:
-                t0_rand = t
-                break
-        return_tuple_rand.append((t0_rand, np.nan, log_df.loc[(t0_rand-back_trial
+        t0_rand = return_a_nearby_random_trial(
+            t0, rowID, min_trial = 1, max_trial = len(log_df) - 1)
+        if not np.isnan(t0_rand):
+            return_tuple_rand.append((t0_rand, np.nan, log_df.loc[(t0_rand-back_trial
                                                                    ):(t0_rand+after_trial)]))
+        else:
+            print(f"Cannot find nearby random trial for {nwb_copy_file_name}, {session_name}, trial {t0}.")
+            # if cannot find, bug.
+            assert 1 == 0
             
     return return_tuple, return_tuple_rand
+
+def return_a_nearby_random_trial(t0, change_of_mind_trials, min_trial = 1, max_trial = 80, subset_trials = None):
+    # subset_trials: if provided, only select from these trials.
+    candidate_trials = [t0-1, t0+1, t0-2, t0+2, t0-3, t0+3]
+    t0_rand = np.nan
+    
+    condition3 = True
+    for t in random.sample(candidate_trials, len(candidate_trials)):
+            
+        condition1 = ~np.isin(t, change_of_mind_trials)
+        condition2 = t >= min_trial and t <= max_trial
+        if subset_trials is not None:
+            condition3 = np.isin(t, subset_trials)
+            
+        if condition1 and (condition2 and condition3):
+            t0_rand = t
+            break
+    return t0_rand
 
 def remove_nan(arr):
     arr = np.array(arr)
     return arr[~np.isnan(arr)]
+
+def parse_to_last_correct(log_tuple_t, seq_map):
+    (t, j_wouldhave, log_df) = log_tuple_t
+    if t == 1:
+        return np.nan
+    rewardNum = log_df.loc[t-1,'rewardNum'] == 2
+    return rewardNum
 
 def parse_to_transitions(log_tuple_t):
     """
@@ -747,8 +832,11 @@ def find_triggered_trial_completion_animal(trialinfo = None,long_theta_flag = Tr
             log=(TrialChoice & key).fetch1('choice_reward')
             log_df=pd.DataFrame(log)
             
-            rowID, trials, proportions, turnaround_times = find_trials(log_df,
-                                                                    linear_position_info, position_info, nearby = False)
+            rowID, turnaround_times = return_change_of_mind_times_from_log(log_df, nearby = False,
+                                                                   multiple_CoM = False,
+                                                                   single_CoM = False,
+                                                                   first_CoM = True, 
+                                                                   last_CoM = False)
             
             mask = np.isin(rowID,trialIDs)
             if long_theta_flag:
@@ -879,7 +967,7 @@ def form_null_model(triggered_positions, triggered_decodes):
 
     # downsample for tractability
     rng = np.random.RandomState(1)
-    training_indices = rng.choice(np.arange(Y_train.size), size=1000, replace=False)
+    training_indices = rng.choice(np.arange(Y_train.size), size=np.min([1000,Y_train.size]), replace=False)
     X_train, Y_train = X_train[training_indices], Y_train[training_indices]
     
     # reshape
@@ -887,36 +975,48 @@ def form_null_model(triggered_positions, triggered_decodes):
     Y_train = Y_train.reshape(-1, 1)
 
     # fit GP
+    # covariance prior
     kernel = 10 * RBF(length_scale=20)
     #kernel = PairwiseKernel(metric='linear',gamma = 20)
-    noise_std = 100 # units cm
+    noise_std = 10 * 10 # units cm
     
     gaussian_process = GaussianProcessRegressor(
         kernel=kernel, alpha=noise_std**2, n_restarts_optimizer=9
-    )
+    ) #Due to multiple local optima, the optimizer can be started repeatedly by specifying n_restarts_optimizer
     gaussian_process.fit(X_train, Y_train)
 
     return gaussian_process, X_train, Y_train
 
-def classify_trial(pos_query, decode_real, gaussian_process):
+def classify_trial(pos_query, decode_real, gaussian_process, positive_only = False, minimum_duration = 0.04,
+                   return_interval = False):
     # given a gaussian process null model between position and decode
     #       and real position and decode data 
     # First, we query all decode null model. 
     # flag if there are cumulative more than 40ms of (null - reality) > 0
+    
+    if np.all(np.isnan(decode_real)):
+        # in the case of decoding quality control having decided this is not a valid decode, we do not further process
+        return False, np.nan, []
+    
     decode_mean_null, decode_std_null = gaussian_process.predict(np.array(pos_query).reshape((-1,1)), return_std=True)
     
     decode_null_u = pd.Series(decode_mean_null + 3 * decode_std_null, index = decode_real.index)
     decode_null_l = pd.Series(decode_mean_null - 3 * decode_std_null, index = decode_real.index)
-    diff = np.logical_or((decode_real - decode_null_u) >= 0, (decode_real - decode_null_l) <= -0)
+    if positive_only: # find discrepancy ahead of the animal
+        diff = (decode_real - decode_null_u) >= 0
+    else: # discrepancy behind and ahead of the animal
+        diff = np.logical_or((decode_real - decode_null_u) >= 0, (decode_real - decode_null_l) <= 0)
+    
     diff = pd.Series(diff, index = decode_real.index)
-    intervals = segment_boolean_series(diff, minimum_duration=0.01)
+    intervals = segment_boolean_series(diff, minimum_duration=minimum_duration)
     #print("front deviation only 10")
     
     #delta_t = np.mean(np.diff(decode_real.index))
     #if np.sum(diff) * delta_t >= 0.04:
     
-    
-    dev_max = np.nanmax(np.abs(np.array(decode_real - pos_query)))
+    discrepancy = np.array(decode_real - pos_query)
+    dev_max_ind = np.nanargmax(np.abs(discrepancy))
+    dev_max = discrepancy[dev_max_ind]
     if len(intervals) > 0:
         """
         # calculate largest metric
@@ -932,51 +1032,81 @@ def classify_trial(pos_query, decode_real, gaussian_process):
         dev_max = np.max(np.array(deviation))
         """
         
-        return True, dev_max
-    return False, dev_max
+        if return_interval:
+            return True, dev_max, intervals
+        else:
+            return True, dev_max, []
+    
+    if return_interval:
+        return False, dev_max, []
+    return False, dev_max, []
 
-def find_large_position_minus_decode_trials(animal, triggered_trial_info, 
-                                            triggered_positions_baseoff, triggered_decodes_baseoff,
-                                            triggered_positions_baseoff_nearby, triggered_decodes_baseoff_nearby):
+def find_large_position_minus_decode_trials_lightweight(gaussian_process, positions, decodes, minimum_duration = 0.04):
+    """
+    like find_large_position_minus_decode_trials(), but works on an existing null model,
+    and process on a specific position and decode snippet
+    """
+    
+    
+    flag_all = False
+    intervals_all = []
+    for ind in range(len(positions)):
+        position = positions[ind]
+        decode = decodes[ind]
+        if len(position) != len(decode):
+            continue
+        flag, _, intervals = classify_trial(position, decode, gaussian_process, minimum_duration = minimum_duration, return_interval = True)
+        if flag:
+            flag_all = True
+        for interval in intervals:
+            intervals_all.append(interval)
+    
+    return flag_all, intervals_all
+
+def find_large_position_minus_decode_trials(trial_info, 
+                                            positions_baseoff, decodes_baseoff,
+                                            positions_nearby, decodes_nearby, return_interval = False,
+                                            minimum_duration = 0.04):
     """return trial info and indices of the trigered parsing for these huge discrepancy dates"""
 
     # form a null model between deocde and position
-    (positions_nearby, decodes_nearby) = (triggered_positions_baseoff_nearby[animal],
-                                          triggered_decodes_baseoff_nearby[animal])
     gaussian_process, _ , _2 = form_null_model(positions_nearby, decodes_nearby)
     
     # compare real data to null
-    (trial_info, positions_abs, decodes_abs) = (
-        triggered_trial_info[animal],
-        triggered_positions_baseoff[animal],
-        triggered_decodes_baseoff[animal])
     trials = []   # with long theta
     inds = []
     dev_maxs = []
+    dev_intervals = []
+    
     trials_non = [] #without long theta
     inds_non = []
     dev_maxs_non = []
     
-    for rendition_ind in range(len(positions_abs)):
-        position_abs = positions_abs[rendition_ind]
-        decode_abs = decodes_abs[rendition_ind]
-        if len(position_abs) != len(decode_abs):
+    
+    for rendition_ind in range(len(positions_baseoff)):
+        position = positions_baseoff[rendition_ind]
+        decode = decodes_baseoff[rendition_ind]
+        if len(position) != len(decode):
             continue
-        flag, dev_max = classify_trial(position_abs, decode_abs, gaussian_process)
+        flag, dev_max, intervals = classify_trial(position, decode, gaussian_process,  minimum_duration = minimum_duration,
+                                                  return_interval = return_interval)
         if flag:
             inds.append(rendition_ind)
             trials.append(trial_info[rendition_ind])
             dev_maxs.append(dev_max)
+            if return_interval:
+                dev_intervals.append(intervals)
         else:
             inds_non.append(rendition_ind)
             trials_non.append(trial_info[rendition_ind])
             dev_maxs_non.append(dev_max)
-            
 
+    if return_interval:
+        return trials, inds, dev_maxs, dev_intervals, trials_non, inds_non, dev_maxs_non
     return trials, inds, dev_maxs, trials_non, inds_non, dev_maxs_non
 
 import matplotlib.cm as cm
-cmap = cm.seismic
+cmap = cm.cool
 from matplotlib.colors import Normalize
    
 def plot_physical_vs_mental_position(animal,positions_abs,
@@ -997,7 +1127,7 @@ def plot_physical_vs_mental_position(animal,positions_abs,
         position_abs = positions_abs[rendition_ind]
         decode_abs = decodes_abs[rendition_ind]
         if len(position_abs) == len(decode_abs):
-            ax1.plot(np.array(decode_abs), np.array(position_abs), linewidth = 1, alpha = 0.5, color = cmap(norm(row_ind)))
+            ax1.scatter(np.array(decode_abs), np.array(position_abs), s = 3, alpha = 0.5, color = cmap(norm(row_ind)))
             row_ind = row_ind + 1
         else:
             print(rendition_ind)
@@ -1101,33 +1231,7 @@ def trials_date_session_to_dict(replay_trials):
     return trials_date_session
 
 
-def triggered_ripple_counterfactual_animal(animal, dates_to_plot, encoding_set, classifier_param_name, decode_thresh):
-    triggered_positions = {}
-    triggered_positions_abs = {}
-    triggered_decodes = {}
-    triggered_decodes_baseoff = {}
-    triggered_decodes_abs = {}
-    triggered_trial_info = {}
 
-    
-    # find decode and position
-    (triggered_positions[animal], triggered_positions_abs[animal],
-     triggered_decodes[animal], triggered_decodes_baseoff[animal], triggered_decodes_abs[animal],
-     triggered_trial_info[animal]) = find_triggered_animal(animal,dates_to_plot,
-                                                                       delta_t_minus = 0,delta_t_plus = 1,
-                                                                       max_flag = 0, segment_only = True)
-    
-    # find_large_position_minus_decode_trials
-    CUTOFF = 25
-    replay_trials, inds = find_large_position_minus_decode_trials(animal, triggered_trial_info, 
-                                                triggered_positions_abs, triggered_decodes_baseoff,cutoff = CUTOFF)
-    
-    trials_date_session_dict = trials_date_session_to_dict(replay_trials)
-    
-    # input this to triggered_ripple_animal
-    (ranges, ripple_ind, session_names, ranges_nearby, ripple_ind_nearby, session_names_nearby) = triggered_ripple_animal(
-        animal, dates_to_plot, encoding_set, classifier_param_name, decode_thresh, post = True, trials = trials_date_session_dict)
-    return (ranges, ripple_ind, session_names, ranges_nearby, ripple_ind_nearby, session_names_nearby)
 
 import statsmodels.api as sm
 def fitLM(x,y):

@@ -385,6 +385,8 @@ class AnalysisNwbfile(SpyglassMixin, dj.Manual):
         analysis_file_name: str,
         nwb_object: pynwb.core.NWBDataInterface,
         table_name: str = "pandas_table",
+        data_name="",
+        description = "",
     ):
         # TODO: change to add_object with checks for object type and a name
         # parameter, which should be specified if it is not an NWB container
@@ -417,7 +419,7 @@ class AnalysisNwbfile(SpyglassMixin, dj.Manual):
                 nwb_object = DynamicTable.from_dataframe(
                     name=table_name, df=nwb_object
                 )
-            nwbf.add_scratch(nwb_object)
+            nwbf.add_scratch(nwb_object, name = data_name, description = description)
             io.write(nwbf)
             return nwb_object.object_id
 

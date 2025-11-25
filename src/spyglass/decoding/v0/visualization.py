@@ -17,7 +17,7 @@ from spyglass.utils import logger
 
 def make_single_environment_movie(
     time_slice,
-    classifier,
+    environment2D,#classifier,
     results,
     position_info,
     marks,
@@ -29,17 +29,27 @@ def make_single_environment_movie(
     vmax=0.07,
 ):
     """Generate a movie of the decoding results for a single environment."""
-    if marks.ndim > 2:
-        multiunit_spikes = (np.any(~np.isnan(marks), axis=1)).astype(float)
-    else:
-        multiunit_spikes = np.asarray(marks, dtype=float)
-    multiunit_firing_rate = pd.DataFrame(
-        get_multiunit_population_firing_rate(
-            multiunit_spikes, sampling_frequency
-        ),
-        index=position_info.index,
-        columns=["firing_rate"],
-    )
+    if marks is not None:
+        if marks.ndim > 2:
+            multiunit_spikes = (np.any(~np.isnan(marks), axis=1)).astype(float)
+        else:
+            multiunit_spikes = np.asarray(marks, dtype=float)
+        multiunit_firing_rate = pd.DataFrame(
+            get_multiunit_population_firing_rate(
+                multiunit_spikes, sampling_frequency
+            ),
+            index=position_info.index,
+            columns=["firing_rate"],
+        )
+        ## Get zscore
+        # Calculate mean and standard deviation
+        multiunit_firing_rate_subset = multiunit_firing_rate[position_info.head_speed >= 4]
+        mean_val = multiunit_firing_rate_subset['firing_rate'].mean()
+        std_val = multiunit_firing_rate_subset['firing_rate'].std() # By default, ddof=1 for sample standard deviation
+
+        # Calculate z-score
+        multiunit_firing_rate['zscore'] = (multiunit_firing_rate['firing_rate'] - mean_val) / std_val
+        ##
 
     # Set up formatting for the movie files
     Writer = animation.writers["ffmpeg"]
@@ -47,12 +57,15 @@ def make_single_environment_movie(
     writer = Writer(fps=fps, bitrate=-1)
 
     # Set up data
-    is_track_interior = classifier.environments[0].is_track_interior_
+    #is_track_interior = classifier.environments[0].is_track_interior
+    is_track_interior = environment2D.is_track_interior_
     posterior = (
-        results.acausal_posterior.isel(time=time_slice)
+        results.causal_posterior.isel(time=time_slice)
         .sum("state")
         .where(is_track_interior)
     )
+
+    
     map_position_ind = posterior.argmax(["x_position", "y_position"])
     map_position = np.stack(
         (
@@ -68,19 +81,28 @@ def make_single_environment_movie(
     window_size = 501
 
     window_ind = np.arange(window_size) - window_size // 2
-    rate = multiunit_firing_rate.iloc[
-        slice(
-            time_slice.start + window_ind[0], time_slice.stop + window_ind[-1]
-        )
-    ]
+    if marks is not None:
+        rate = multiunit_firing_rate.iloc[
+            slice(
+                time_slice.start + window_ind[0], time_slice.stop + window_ind[-1]
+            )
+        ].zscore
+        
+        
+    state_posterior = (
+        results.isel(time=slice(
+                time_slice.start + window_ind[0], time_slice.stop + window_ind[-1]
+            )).causal_posterior
+        .sum(["x_position","y_position"])
+    )
 
     with plt.style.context("dark_background"):
         # Set up plots
         fig, axes = plt.subplots(
-            2,
+            3,
             1,
-            figsize=(6, 6),
-            gridspec_kw={"height_ratios": [5, 1]},
+            figsize=(6, 7),
+            gridspec_kw={"height_ratios": [5, 1, 1]},
             constrained_layout=False,
         )
 
@@ -150,22 +172,42 @@ def make_single_environment_movie(
 
         axes[0].add_artist(scalebar)
         axes[0].axis("off")
+        axes[0].invert_yaxis()
 
         (multiunit_firing_line,) = axes[1].plot(
             [], [], color="white", linewidth=2, animated=True, clip_on=False
         )
-        axes[1].set_ylim((0.0, np.asarray(rate.max())))
+        axes[1].set_ylim((-3, 3))
+        #axes[1].set_ylim((0.0, 1))
         axes[1].set_xlim(
             (
                 window_ind[0] / sampling_frequency,
                 window_ind[-1] / sampling_frequency,
             )
         )
-        axes[1].set_xlabel("Time [s]")
+        #axes[1].set_xlabel("Time [s]")
         axes[1].set_ylabel("Multiunit\n[spikes/s]")
         axes[1].set_facecolor("black")
         axes[1].spines["top"].set_color("black")
         axes[1].spines["right"].set_color("black")
+        
+        (decode_state_line,) = axes[2].plot(
+            [], [], color="white", linewidth=2, animated=True, clip_on=False
+        )
+
+        axes[2].set_ylim((0.0, 1))
+        axes[2].set_xlim(
+            (
+                window_ind[0] / sampling_frequency,
+                window_ind[-1] / sampling_frequency,
+            )
+        )
+        
+        axes[2].set_xlabel("Time [s]")
+        axes[2].set_ylabel("Decode\nContinuous\nstate probability")
+        axes[2].set_facecolor("black")
+        axes[2].spines["top"].set_color("black")
+        axes[2].spines["right"].set_color("black")
 
         n_frames = posterior.shape[0]
         progress_bar = tqdm()
@@ -202,15 +244,27 @@ def make_single_environment_movie(
                 f"time = {posterior.isel(time=time_ind).time.values:0.2f}"
             )
 
-            try:
-                multiunit_firing_line.set_data(
+            #try:
+            multiunit_firing_line.set_data(
                     window_ind / sampling_frequency,
                     np.asarray(
                         rate.iloc[time_ind + (window_size // 2) + window_ind]
                     ),
                 )
-            except IndexError:
-                pass
+            #except: #IndexError:
+            #    pass
+            indices = window_ind + time_ind + (window_size // 2)
+            decode_state_line.set_data(
+                window_ind / sampling_frequency,
+                np.asarray(
+                    state_posterior.isel(
+                        time=slice(indices[0],indices[-1]+1)
+                        )
+                )[:,0],
+            ),
+            axes[1].axvline(0, color='white', linestyle='--', linewidth=1)
+            axes[2].axvline(0, color='white', linestyle='--', linewidth=1)
+            
 
             progress_bar.update()
 

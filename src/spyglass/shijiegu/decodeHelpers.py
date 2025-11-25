@@ -55,6 +55,13 @@ def runSessionNames(nwb_copy_file_name):
             position_interval.append(positionNames[i])
     return session_interval, position_interval
 
+def session2position_name(nwb_file_name_copy, session_name):
+    session_interval, position_interval = runSessionNames(nwb_file_name_copy)
+    for ind in range(len(session_interval)):
+        if session_interval[ind] == session_name:
+            return position_interval[ind]
+    return None
+
 def sleepSessionNames(nwb_copy_file_name):
     # select position timestamps, only maze sessions are selected
 
@@ -248,7 +255,8 @@ def thresholder_sort(nwb_copy_file_name,sort_interval_name,populate=True):
                     'sort_interval_name' : sort_interval_name,
                     'sort_group_id' : tetrode,
                     'preproc_params_name': 'franklab_tetrode_hippocampus',
-                    'team_name': 'SequenceTask'}#'SequenceTask'} #'team_name': 'Shijie Gu' or 'SequenceTask'
+                    'team_name': 'Shijie Gu'} 
+                    #'team_name': 'SequenceTask'}#'SequenceTask'} #'team_name': 'Shijie Gu' or 'SequenceTask'
         artifact_key['artifact_params_name'] = artifact_params_name
 
         if populate:

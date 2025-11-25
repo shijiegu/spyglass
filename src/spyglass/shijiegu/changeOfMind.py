@@ -3,8 +3,7 @@ import pandas as pd
 import numpy as np
 import xarray as xr
 from scipy import stats
-from scipy import linalg
-from scipy import ndimage
+
 import os
 import matplotlib.pyplot as plt
 from spyglass.common import (Session, IntervalList,LabMember, LabTeam, Raw, Session, Nwbfile,
@@ -14,15 +13,21 @@ from spyglass.spikesorting.v0 import (SortGroup, Curation,
                                     SpikeSortingRecording,SpikeSortingRecordingSelection)
 from spyglass.utils.nwb_helper_fn import get_nwb_copy_filename
 from spyglass.common.common_position import IntervalPositionInfo, RawPosition, IntervalLinearizedPosition, TrackGraph
+from spyglass.common.common_nwbfile import AnalysisNwbfile
 
-from spyglass.shijiegu.Analysis_SGU import TrialChoice,EpochPos,MUA,get_linearization_map, TrialChoiceChangeofMind
-from spyglass.shijiegu.decodeHelpers import runSessionNames
+from spyglass.shijiegu.Analysis_SGU import TrialChoice,EpochPos,MUA,get_linearization_map, ChangeofMind
+from spyglass.shijiegu.decodeHelpers import runSessionNames, session2position_name
 from spyglass.shijiegu.ripple_add_replay import plot_decode_spiking, plot_decode_sortedSpikes
 from spyglass.shijiegu.load import load_epoch_data
 from ripple_detection.core import segment_boolean_series
 from spyglass.shijiegu.singleUnit import get_nwb_units
 from spyglass.shijiegu.singleUnit_sortedDecode import place_field_direction, color_cells_by_place_direction
 
+from spyglass.shijiegu.changeOfMind_helper import findProportion
+from spyglass.shijiegu.changeOfMind_byTransition import time2arm
+from spyglass.shijiegu.changeOfMind_triggered import return_change_of_mind_times_from_log
+
+color_by_rat = {"eliot": "C0","molly":"C2","lewis":"C4","julio":"C1","klein":"deepskyblue"}
 
 # in the linearized track, segment 0 correspond to home, 1 to platform etc.
 labels={}
@@ -38,6 +43,7 @@ graph = TrackGraph() & {'track_graph_name': '4 arm lumped 2023'}
 node_positions = graph.fetch1("node_positions")
 #linear_map,node_location=get_linearization_map()
 nodes={}
+nodes[5] = (node_positions[1],node_positions[0])
 nodes[6] = (node_positions[2],node_positions[3])
 nodes[7] = (node_positions[4],node_positions[5])
 nodes[8] = (node_positions[6],node_positions[7])
@@ -47,6 +53,10 @@ vectors = {}
 for key in nodes.keys():
     vector = nodes[key][1] - nodes[key][0]
     vectors[key] = vector/np.linalg.norm(vector)
+vectors[1] = np.array([0,0])
+
+rotation = np.array([[0,-1],[1,0]])
+rotated_vectors = {key: np.matmul(rotation, vectors[key].reshape((2,1))) for key in vectors.keys()}
     
 def find_statescrripts(animal,list_of_days):
     logs_days = {}
@@ -65,7 +75,12 @@ def find_statescrripts(animal,list_of_days):
         logs_days[day] = logs
     return logs_days
     
-def find_trials_animal(animal,list_of_days,plot = False,proportion_threshold = 0.2):
+def find_trials_animal(animal, list_of_days,
+                       plot = False,
+                       sorted_spikes = False,
+                       plot_ripple = False,
+                       plot_spike = True,
+                       proportion_threshold = 0.2):
     trials_days = {}
     for day in list_of_days:
         trials = []
@@ -76,7 +91,11 @@ def find_trials_animal(animal,list_of_days,plot = False,proportion_threshold = 0
             session_name = session_interval[ind]
             position_name = position_interval[ind]
             if plot:
-                trials.append(find_trials_session_plot(nwb_copy_file_name,session_name,position_name,proportion_threshold=proportion_threshold))
+                trials.append(find_trials_session_plot(nwb_copy_file_name,session_name,position_name,
+                                                       sorted_spikes = sorted_spikes,
+                                                       plot_ripple = plot_ripple,
+                                                       plot_spike = plot_spike,
+                                                       proportion_threshold=proportion_threshold))
             else:
                 trials.append(find_trials_session(nwb_copy_file_name,
                                                   session_name,position_name,
@@ -85,11 +104,26 @@ def find_trials_animal(animal,list_of_days,plot = False,proportion_threshold = 0
         
     return trials_days
 
+def find_arm_proportion(arm, proportion_threshold, arm_id, proportion):
+    arm_proportion = proportion[arm_id == arm]
+    if len(arm_proportion) == 0:
+        return 0
+    
+    max_prop = np.max(proportion[arm_id == arm]) 
+    if max_prop > proportion_threshold:
+        return max_prop
+    return 0
+
 def insertTrialChoiceChangeOfMind(trials_days, proportion_threshold):
     for date in trials_days.keys():
+        
         for session_ind in range(len(trials_days[date])):
             trials_info = trials_days[date][session_ind]
             (nwb_file_name_copy, session_name)= trials_days[date][session_ind][4]
+            position_name = session2position_name(nwb_file_name_copy, session_name)
+            linear_position_info = (IntervalLinearizedPosition & {"nwb_file_name":nwb_file_name_copy, 
+                                                "position_info_param_name": "default",
+                                                "interval_list_name":position_name}).fetch1_dataframe()
     
             key={'nwb_file_name':nwb_file_name_copy,
                  'epoch_name':session_name}
@@ -102,12 +136,32 @@ def insertTrialChoiceChangeOfMind(trials_days, proportion_threshold):
             # initialization
             log_df2.insert(5,'change_of_mind',[False for i in range(len(log_df))])
             #hold boolean to indicate whether a trial is a change of mind
-            log_df2.insert(6,'CoMMaxProportion',[[] for i in range(len(log_df))])
+            
+            log_df2.insert(6,'CoMMaxProportion',[np.nan for i in range(len(log_df))])
             #hold max proportion of traversed arms, in the case of multiple change of mind, this is the max of all the arms
-            log_df2.insert(7,'CoM_t',[[] for i in range(len(log_df))])
-            # change of mind time, there can be multiple times
-            log_df2.insert(8,'CoM_arm',[[] for i in range(len(log_df))])
-            # change of mind arm, there can be multiple arms
+                      
+            log_df2.insert(7,'initial_choice',[np.nan for i in range(len(log_df))])
+            # the first arm the animal has changed its mind
+            
+            log_df2.insert(8,'initial_time',[np.nan for i in range(len(log_df))])
+            # the first time the animal has stopped to change its mind
+            
+            log_df2.insert(9,'proportion_arm1',[np.nan for i in range(len(log_df))])
+            # the first time the animal has stopped to change its mind
+            
+            log_df2.insert(10,'proportion_arm2',[np.nan for i in range(len(log_df))])
+            # the first time the animal has stopped to change its mind
+            
+            log_df2.insert(11,'proportion_arm3',[np.nan for i in range(len(log_df))])
+            # the first time the animal has stopped to change its mind
+            
+            log_df2.insert(12,'proportion_arm4',[np.nan for i in range(len(log_df))])
+            # the first time the animal has stopped to change its mind
+            
+            log_df2.insert(13,'CoMNum_by_time',[0 for i in range(len(log_df))])
+            
+            log_df2.insert(14,'CoMNum_by_arm',[0 for i in range(len(log_df))])
+            
     
             # fill the table
             trials = trials_info[0]
@@ -116,32 +170,73 @@ def insertTrialChoiceChangeOfMind(trials_days, proportion_threshold):
                 print("No change of mind on session " + session_name)
                 
             else:
+                arm_id = trials_info[1] - 5
+                proportion = trials_info[2]
                 max_proportion = np.nanmax(trials_info[2], axis = 1)
                 turn_around_t = trials_info[3] # there are can be multiple turn arounds per trial!
                 for trialID_ind in range(len(trials)):
+                    if len(turn_around_t[trialID_ind]) == 0:
+                        continue
                     trialID = trials[trialID_ind]
+                    
                     log_df2.loc[trialID,'change_of_mind'] = True
                     log_df2.loc[trialID,'CoMMaxProportion'] = max_proportion[trialID_ind]
-                    log_df2.loc[trialID,'CoM_t'].append(turn_around_t[trialID_ind])
-                    turn_around_arms = list(unique_stable(trials_info[1][trialID_ind] - 5).astype("int"))
-                    log_df2.loc[trialID,'CoM_arm'].append(turn_around_arms)
+                    log_df2.loc[trialID,'initial_choice'] = time2arm(turn_around_t[trialID_ind][0],
+                                                                     linear_position_info)
+                    log_df2.loc[trialID,'initial_time'] = turn_around_t[trialID_ind][0]
+                    log_df2.loc[trialID,'CoMNum_by_time'] = len(turn_around_t[trialID_ind])
+                    
+                    arm_id_trial = arm_id[trialID_ind]
+                    
+                    log_df2.loc[trialID,'proportion_arm1'] = find_arm_proportion(1, proportion_threshold, arm_id_trial, proportion[trialID_ind])
+                    log_df2.loc[trialID,'proportion_arm2'] = find_arm_proportion(2, proportion_threshold, arm_id_trial, proportion[trialID_ind])
+                    log_df2.loc[trialID,'proportion_arm3'] = find_arm_proportion(3, proportion_threshold, arm_id_trial, proportion[trialID_ind])
+                    log_df2.loc[trialID,'proportion_arm4'] = find_arm_proportion(4, proportion_threshold, arm_id_trial, proportion[trialID_ind])
+                    
+                    log_df2.loc[trialID,'CoMNum_by_arm'] = np.sum([log_df2.loc[trialID,'proportion_arm1'] > 0,
+                                                                   log_df2.loc[trialID,'proportion_arm2'] > 0,
+                                                                   log_df2.loc[trialID,'proportion_arm3'] > 0,
+                                                                   log_df2.loc[trialID,'proportion_arm4'] > 0,
+                                                                   ])
+                    
+                    # Due to the nwb format, lists of different lengths are not able to be saved.
+                    # Omitting the following field.
+                    #turn_around_arms = list(unique_stable(trials_info[1][trialID_ind] - 5).astype("int"))
+                    #log_df2.loc[trialID,'CoM_arm'].append(turn_around_arms)
                 
-            animal = nwb_file_name_copy[:5]
-            savePath = os.path.join(f'/cumulus/shijie/recording_pilot/{animal}/decoding',
-                            nwb_file_name_copy+'_'+session_name + str(proportion_threshold) + '_changeofMindlog.pkl')
-            log_df2.to_pickle(savePath)
+            #animal = nwb_file_name_copy[:5]
+            #savePath = os.path.join(f'/cumulus/shijie/recording_pilot/{animal}/decoding',
+            #                nwb_file_name_copy+'_'+session_name + str(proportion_threshold) + '_changeofMindlog.pkl')
+            #log_df2.to_pickle(savePath)
     
             # insert
             key = {"nwb_file_name":nwb_file_name_copy,
                    "epoch":epoch_num,
-                   "proportion":str(proportion_threshold),
-                   "change_of_mind_info":savePath}
-            TrialChoiceChangeofMind().insert1(key, replace = True)
+                   "proportion":str(proportion_threshold)}
+            # Insert into analysis nwb file
+            nwb_analysis_file = AnalysisNwbfile()
+            key["analysis_file_name"] = AnalysisNwbfile().create(key["nwb_file_name"])
+            key["pandas_id"] = nwb_analysis_file.add_nwb_object(
+                analysis_file_name=key["analysis_file_name"],
+                nwb_object=log_df2,
+            )
+            nwb_analysis_file.add(
+                nwb_file_name=key["nwb_file_name"],
+                analysis_file_name=key["analysis_file_name"],
+            )
+            
+            ChangeofMind().insert1(key, replace = True)
+            
+            AnalysisNwbfile().log(key, table=ChangeofMind().full_table_name)
+    return 1
 
 
 
 def find_trials_session_plot(nwb_copy_file_name,session_name,position_name,
-                             proportion_threshold = 0.1, sorted = False, curation_id = 1, decode_options = {}):
+                             proportion_threshold = 0.1, sorted_spikes = False,
+                             plot_ripple = False,
+                             plot_spike = True,
+                             curation_id = 1, decode_options = {}):
     # in addition to finding trials with change of mind, this function also plots decode data
     # curation_id is only for sorted data
     # 
@@ -164,12 +259,15 @@ def find_trials_session_plot(nwb_copy_file_name,session_name,position_name,
     camera_frequency = 1/stats.mode(np.diff(linear_position_info.index))[0]
     
     # 2. load stateScript
-    key={'nwb_file_name':nwb_copy_file_name,'epoch':int(session_name[:2])}
-    log=(TrialChoice & key).fetch1('choice_reward')
-    log_df=pd.DataFrame(log)
+    key={'nwb_file_name':nwb_copy_file_name,'epoch':int(session_name[:2]),
+         "proportion":str(proportion_threshold)}
+    log_df = ChangeofMind().fetch1_dataframe(key)
     
-    rowID, trials, proportions, turnaround_times = find_trials(log_df,
-                                                               linear_position_info, position_info, proportion_threshold = proportion_threshold)
+    rowID, turnaround_times = return_change_of_mind_times_from_log(log_df, linear_position_info, nearby = False,
+                                                                   multiple_CoM = True,
+                                                                   single_CoM = True,
+                                                                   first_CoM = False, 
+                                                                   last_CoM = False)
     
     # 3. load data
     if len(decode_options.keys()) == 0:
@@ -177,23 +275,25 @@ def find_trials_session_plot(nwb_copy_file_name,session_name,position_name,
             decode_options["encoding_set"] = '2Dheadspeed_above_4_andlowmua'
             decode_options["classifier_param_name"] = 'default_decoding_gpu_4armMaze'
             decode_options["decode_threshold_method"] = 'MUA_0SD'
-            decode_options["causal"] = False
+            decode_options["causal"] = True
             decode_options["likelihood"] = False
         else:
             decode_options["encoding_set"] = '2Dheadspeed_above_4'
             decode_options["classifier_param_name"] = 'default_decoding_gpu_4armMaze'
             decode_options["decode_threshold_method"] = 'MUA_M05SD'
-            decode_options["causal"] = False
+            decode_options["causal"] = True
             decode_options["likelihood"] = False
     
     (_,decode,head_speed,head_orientation,
-            linear_position_df,lfp_df,theta_df,ripple_df,neural_df,mua_xr,mua_threshold,spikeColInd) = load_epoch_data_wrapper(
-                nwb_copy_file_name, session_name, position_name, decode_options)
+            linear_position_df,lfp_df,theta_df,
+            ripple_df,neural_df,mua_xr,mua_mean,mua_sd,spikeColInd) = load_epoch_data_wrapper(
+                nwb_copy_file_name, session_name, position_name, decode_options,
+                load_ripple_flag = plot_ripple, load_spike_flag = plot_spike)
             
     output_folder = f'/cumulus/shijie/recording_pilot/{animal}/changeOfMind'
     
     # 3.5 for sorted spikes only:
-    if sorted:
+    if sorted_spikes:
         
         #sort_group_ids = list(nwb_units_all.keys())
     
@@ -214,7 +314,7 @@ def find_trials_session_plot(nwb_copy_file_name,session_name,position_name,
         arm_direction_t, arm_direction, _ = findDirectionPlot(t,log_df,linear_position_info,position_info)
         head_direction_sign = pd.Series(arm_direction, index = arm_direction_t)
         
-        if sorted:
+        if sorted_spikes:
             filename = animal+'_'+nwb_copy_file_name+'_'+session_name+'_trial'+str(t)+'sortedSpiked'
             plot_decode_sortedSpikes(nwb_copy_file_name,session_name,
                          plottimes,[],linear_position_df,decode,lfp_df,theta_df,
@@ -233,11 +333,11 @@ def find_trials_session_plot(nwb_copy_file_name,session_name,position_name,
                                 neural_df,mua_xr,head_speed,head_orientation,
                                 ripple_consensus_trace=None,
                                 title = '', savefolder = output_folder, savename = filename,
-                                simple = True, tetrode2ind = spikeColInd, likelihood = False,mua_thresh=mua_threshold,causal = decode_options["causal"],
-                                plot_spiking=True, 
+                                simple = True, tetrode2ind = spikeColInd, likelihood = False,mua_thresh=mua_mean,causal = decode_options["causal"],
+                                plot_spiking = plot_spike, 
                                 plot_changeofmind = True, turnaround = turnaround_t, head_direction_sign = head_direction_sign)
             
-    if sorted:
+    if sorted_spikes:
         return rowID, smoothed_placefield, placefield_peak, spike_count_by_arm_direction, time_spent_by_arm_direction, betaPdfs, means
     return rowID
     
@@ -301,6 +401,7 @@ def find_trials_session(nwb_copy_file_name,session_name,position_name,return_all
     if return_all:
         return rowID, trials, proportions, turnaround_times, (nwb_copy_file_name, session_name)
     return rowID
+
     
 
 def find_trials(log_df, linear_position_info, position_info, proportion_threshold = 0.2, nearby = False):
@@ -319,7 +420,7 @@ def find_trials(log_df, linear_position_info, position_info, proportion_threshol
     rowID is trial number.
     """
     camera_frequency = 1/np.mean(np.diff(linear_position_info.index))
-    maxLength = int(60*camera_frequency) #use at most 60 seconds prior to nose poke at the outer well. 
+    maxLength = int(120*camera_frequency) #use at most 120 seconds prior to nose poke at the final outer well the rat picked. 
     trials = np.zeros((len(log_df.index),maxLength)) + np.nan
     proportions = np.zeros((len(log_df.index),maxLength)) + np.nan
     #directions = np.zeros((len(log_df.index),maxLength)) + np.nan
@@ -347,7 +448,10 @@ def find_trials(log_df, linear_position_info, position_info, proportion_threshol
         if (len(np.unique(trialSeg)) >= 4):
             
             # change into proportion
-            proportion, track_segment_id, max_proportion, turnaround_time = findProportion(trialPosInfo)
+            proportion, track_segment_id, max_proportion, turnaround_time = findProportion(trialPosInfo, camera_frequency)
+            
+            if len(turnaround_time) == 0:
+                continue
 
             if np.max(max_proportion) >= proportion_threshold:
                 trials[rowInd,:len(track_segment_id)] = track_segment_id
@@ -387,12 +491,26 @@ def find_trials(log_df, linear_position_info, position_info, proportion_threshol
 
     return rowID, trials, proportions, turnaround_times
 
-def unique_stable(arr):
-    unique_values, indices = np.unique(arr, return_index=True)
-    unique_values_stable = unique_values[np.argsort(indices)]
+def find_direction_dot_product(trialInfo, trialInfo2D):
+    #trialInfo is 1D position info
+    #trialInfo2D is 2D position info
+    outerArmInd = np.array(trialInfo.track_segment_id)
+    
+    head_orientation = np.array(trialInfo2D.head_orientation)
+    head_orientation_cos = np.cos(head_orientation)
+    head_orientation_sin = np.sin(head_orientation)
 
-    return unique_values_stable
+    arm_direction = np.array([vectors[ind] for ind in outerArmInd])
+    arm_direction[outerArmInd == 0,0] = np.nan
+    arm_direction[outerArmInd == 1,0] = np.nan
+    arm_direction[outerArmInd == 0,1] = np.nan
+    arm_direction[outerArmInd == 1,1] = np.nan
+    rotated_arm_direction = np.matmul(rotation,arm_direction.T).T
 
+    arm_direction = head_orientation_cos*arm_direction[:,0] + head_orientation_sin*arm_direction[:,1]
+    rightward = head_orientation_cos*rotated_arm_direction[:,0] + head_orientation_sin*rotated_arm_direction[:,1]
+    return arm_direction, rightward
+    
 def find_direction(trialInfo, trialInfo2D):
     #trialInfo is 1D position info
     outerArmInd = trialInfo.track_segment_id >= 6
@@ -416,84 +534,45 @@ def find_direction(trialInfo, trialInfo2D):
     return trialInfo.index, arm_direction, all_arms_direction
 
 
-def find_turnaround_time(proportion,trialPosInfoOuter):
-    """detects turn around time"""
-    proportion_diff = np.concatenate(([0],np.diff(proportion))) < 0
-    proportion_diff = ndimage.binary_closing(proportion_diff,iterations = 75) 
-    # irregularity under 0.3s are smoothened, 75 * 0.002 (2ms) * 2
-    
-    turnsaround = pd.Series(proportion_diff, index = trialPosInfoOuter.index)
-    #turnsaround = pd.Series(proportion_diff < 0.0001, index = trialPosInfoOuter.index)
-    turnsaround_segments = np.array(segment_boolean_series(
-            turnsaround, minimum_duration=0.1)).reshape((-1,2))
-
-    return turnsaround_segments[:,0]
-
-def findProportion(trialPosInfo):
-    outerArmInd = trialPosInfo.track_segment_id >= 4
-    trialPosInfoOuter = trialPosInfo.loc[outerArmInd,:]
-    
-    # exclude the final segment in time
-    last_arm = np.array(trialPosInfoOuter.track_segment_id)[-1]
-    same_arm_last_segment = pd.Series(np.array(trialPosInfoOuter.track_segment_id) == last_arm, 
-                                      index = trialPosInfoOuter.index)
-    same_arm_last_segment_segments = np.array(segment_boolean_series(
-            same_arm_last_segment, minimum_duration=0)).reshape((-1,2))
-    
-    trialPosInfoOuter = trialPosInfoOuter.loc[trialPosInfoOuter.index <= same_arm_last_segment_segments[-1][0],:]
-    
-    segments_involved = unique_stable(trialPosInfoOuter.track_segment_id)
-    
-    track_segment_node_start = np.array([nodes[i][0] for i in np.array(trialPosInfoOuter.track_segment_id)])
-    track_segment_node_end = np.array([nodes[i][1] for i in np.array(trialPosInfoOuter.track_segment_id)])
-
-    trialPosInfoOuter.projected_xy = np.hstack((np.array(trialPosInfoOuter.projected_x_position).reshape((-1,1)),
-                                            np.array(trialPosInfoOuter.projected_y_position).reshape((-1,1))))
-    
-    full_length = linalg.norm(track_segment_node_start - track_segment_node_end, axis = 1)
-    partial_length = linalg.norm(track_segment_node_start - trialPosInfoOuter.projected_xy, axis = 1)
-    proportion = partial_length / full_length
-    track_segment_id = trialPosInfoOuter.track_segment_id
-
-    max_proportion = []
-    turnaround_times = []
-    for seg in segments_involved:
-        seg_index = np.argwhere(trialPosInfoOuter.track_segment_id == seg).ravel()
-        max_proportion.append( np.nanmax(proportion[seg_index]) )
-        ts = find_turnaround_time(proportion[seg_index],
-                                 trialPosInfoOuter[trialPosInfoOuter.track_segment_id == seg])
-        # there can be multiple turnaround times in each arm
-        for t in ts:
-            turnaround_times.append(t)
-        
-    return proportion, np.array(track_segment_id).astype("int"), max_proportion, turnaround_times
-
-def load_epoch_data_wrapper(nwb_copy_file_name, session_name, position_name, decode_options):
+def load_epoch_data_wrapper(nwb_copy_file_name, session_name, position_name, decode_options,
+                            load_ripple_flag = True,
+                            load_spike_flag = True,
+                            use_1d_decode = True):
     # This function loads decode, LFP etc from various tables.
 
     epoch_num = (EpochPos & {'nwb_file_name':nwb_copy_file_name,'position_interval':position_name}).fetch1("epoch")
     (_,log_df,decode,head_speed,head_orientation,linear_position_df,
             lfp_df,theta_df,ripple_df,neural_df,_) = load_epoch_data(nwb_copy_file_name,epoch_num,
                                                       decode_options["classifier_param_name"],
-                                                      decode_options["encoding_set"])
-    """ find tetrodes with signal """
-    groups_with_cell=(SpikeSortingRecordingSelection & {
-            'nwb_file_name' : nwb_copy_file_name}).fetch('sort_group_id')
-    groups_with_cell=np.setdiff1d(groups_with_cell,[100,101])
-    channel_IDs = list(neural_df.keys())
-        
-    spikeColInd = {}
-    for g in groups_with_cell:
-        spikeColInd_ = np.argwhere(np.isin(channel_IDs,(Electrode() &  {'nwb_file_name' : nwb_copy_file_name,
-                                                         'electrode_group_name':str(g)}).fetch('electrode_id'))).ravel()
-        spikeColInd[g] = spikeColInd_
+                                                      decode_options["encoding_set"],
+                                                      load_ripple_flag = load_ripple_flag,
+                                                      load_spike_flag = load_spike_flag,
+                                                      use_1d_decode = use_1d_decode)
+    if load_spike_flag:
+        """ find tetrodes with signal """
+        groups_with_cell=(SpikeSortingRecordingSelection & {
+                'nwb_file_name' : nwb_copy_file_name}).fetch('sort_group_id')
+        groups_with_cell=np.setdiff1d(groups_with_cell,[100,101])
+        channel_IDs = list(neural_df.keys())
+            
+        spikeColInd = {}
+        for g in groups_with_cell:
+            spikeColInd_ = np.argwhere(np.isin(channel_IDs,(Electrode() &  {'nwb_file_name' : nwb_copy_file_name,
+                                                            'electrode_group_name':str(g)}).fetch('electrode_id'))).ravel()
+            spikeColInd[g] = spikeColInd_
+    else:
+        spikeColInd = {}
 
 
     """load MUA"""
-    decode_threshold_method = decode_options["decode_threshold_method"]
-    mua_path=(MUA & {'nwb_file_name': nwb_copy_file_name,
-                     'interval_list_name':session_name}).fetch1('mua_trace')
+    #decode_threshold_method = decode_options["decode_threshold_method"]
+    q = MUA & {'nwb_file_name': nwb_copy_file_name,
+               'interval_list_name':session_name}
+    mua_path= q.fetch1('mua_trace')
     mua_xr = xr.open_dataset(mua_path)
+    mua_mean = q.fetch1("mean")
+    mua_sd = q.fetch1("sd")
+    """
     if decode_threshold_method == 'MUA_0SD':
         mua_threshold=(MUA & {'nwb_file_name': nwb_copy_file_name,
                     'interval_list_name':session_name}).fetch1('mean')
@@ -507,9 +586,10 @@ def load_epoch_data_wrapper(nwb_copy_file_name, session_name, position_name, dec
                     'interval_list_name':session_name}).fetch1('sd')
     else:
         mua_threshold = 0
+    """
 
     return (log_df,decode,head_speed,head_orientation,
-            linear_position_df,lfp_df,theta_df,ripple_df,neural_df,mua_xr,mua_threshold,spikeColInd)
+            linear_position_df,lfp_df,theta_df,ripple_df,neural_df,mua_xr,mua_mean,mua_sd,spikeColInd)
     
 def normalize(T_):
     T=T_.copy()

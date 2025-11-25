@@ -20,8 +20,9 @@ from spyglass.common.common_position import IntervalPositionInfo,IntervalLineari
 from spyglass.common import LFPBand
 from spyglass.spikesorting.v0 import (SpikeSortingRecording)
 from spyglass.decoding.v0.clusterless import ClusterlessClassifierParameters
-
+#from spyglass.utils import SpyglassMixin
 from spyglass.spikesorting.v0.spikesorting_curation import Waveforms
+from spyglass.common.common_nwbfile import AnalysisNwbfile
 
 
 from ripple_detection import Kay_ripple_detector
@@ -145,6 +146,15 @@ class MUA(dj.Manual):
     mean = 0: double  # mean
     sd = 0: double #sd
     """
+    
+@schema
+class SingleUnit(dj.Manual):
+    definition = """
+    # Single Unit record
+    -> IntervalList
+    ---
+    cell_type_pd = NULL: longblob  # firing_rate, ac_mean, spike_width, classification
+    """
 
 @schema
 class Footprint(dj.Manual):
@@ -210,6 +220,7 @@ class LFPBandArtifact(dj.Manual):
     -> LFPBand
     artifact_params_name : varchar(64) # a name for this set of encoding
     ---
+    -> AnalysisNwbfile
     analysis_nwb_file_name : varchar(64)   # name of the file
     """
 
@@ -266,7 +277,20 @@ class DecodeResultsLinear(dj.Manual):
     ---
     posterior = NULL: blob   # posterior within that interval (1D)
     """
-
+    
+@schema
+class DecodeResults2D(dj.Manual):
+    definition = """
+    # decoded 2D replay content results
+    -> IntervalList
+    -> ClusterlessClassifierParameters
+    encoding_set : varchar(32) # a name for this set of encoding
+    ---
+    posterior = NULL: blob   # posterior within that interval (2D)
+    posterior_1d = NULL: blob   # posterior within that interval (1D)
+    classifier = NULL: blob   # classifier path (1D)
+    """
+    
 @schema
 class ExtendedRippleTimesWithDecode(dj.Manual):
     definition = """
@@ -404,17 +428,95 @@ class TrialChoiceReplayTransition(dj.Manual):
         self.insert1(key,replace=replace)
         
 @schema
-class TrialChoiceChangeofMind(dj.Manual):
+class ChangeofMind(dj.Manual):
     definition = """
-    # trial by trial information of choice NOTE: ripple based
+    # trial by trial information of choice
+    # with additional information such as if the trial is a ChangeofMind trial
     -> TrialChoice
     proportion: varchar(20)           # minimal amount of proportion the animal is in before it backed out
     ---
-    change_of_mind_info = NULL: blob  # pandas dataframe, choice, reward, ripple time, replays
+    
+    analysis_file_name : varchar(64)   # name of the nwb analysis file
+    pandas_id : varchar(64)   # id of pandas table
+    pandas = NULL: longblob  # pandas dataframe saved as dictionary, choice
     """
     def make(self,key,replace=False):
-
         self.insert1(key,replace=replace)
+    
+    def fetch1_dataframe(self,key):
+        analysis_nwb_file_name = (ChangeofMind() & key).fetch1("analysis_file_name")
+        analysis_file_abs_path = (AnalysisNwbfile() & {
+            "analysis_file_name":analysis_nwb_file_name}).fetch1('analysis_file_abs_path')
+        with pynwb.NWBHDF5IO(analysis_file_abs_path, 'r',load_namespaces=True) as io:
+            nwb_file = io.read()
+            df = nwb_file.scratch["pandas_table"].to_dataframe()
+        return df
+    
+    # def fetch1_dataframe(self,key):
+    #     q = (ChangeofMind() & key).fetch1("pandas")
+    #     df = pd.DataFrame.from_dict(q)
+    #     return df
+        
+        
+@schema
+class ChangeofMindTheta(dj.Manual):
+    definition = """
+    # trial by trial information of choice
+    # with additional information such as 
+    # - if the trial is a ChangeofMind trial
+    # - initial arm choice
+    # - initial C-O-M time
+    # - max theta length at initial choice
+    -> TrialChoice
+    proportion: varchar(20)           # minimal amount of proportion the animal is in before it backed out
+    delta_t_minus: varchar(20)        # time in seconds, before change of mind that we look for theta decodes
+    delta_t_plus: varchar(20)         # time in seconds, after change of mind that we look for theta decodes
+    max_flag: int
+    ---
+    analysis_file_name : varchar(64)   # name of the nwb analysis file
+    pandas = NULL: longblob            # pandas dataframe saved as dictionary, choice
+    """
+    def make(self,key,replace=False):
+        self.insert1(key,replace=replace)
+        
+    # def fetch1_dataframe(self,key):
+    #     analysis_nwb_file_name = (ChangeofMindTheta() & key).fetch1("analysis_file_name")
+    #     analysis_file_abs_path = (AnalysisNwbfile() & {
+    #         "analysis_file_name":analysis_nwb_file_name}).fetch1('analysis_file_abs_path')
+    #     with pynwb.NWBHDF5IO(analysis_file_abs_path, 'r',load_namespaces=True) as io:
+    #         nwb_file = io.read()
+    #         df = nwb_file.scratch["pandas_table"].to_dataframe()
+    #     return df
+    
+    def fetch1_dataframe(self,key):
+        q = (ChangeofMindTheta() & key).fetch1("pandas")
+        df = pd.DataFrame.from_dict(q)
+        return df
+
+@schema
+class ChangeofMindRemoteTheta(dj.Manual):
+    definition = """
+    # trial by trial information of choice
+    # with additional information such as 
+    # - if the trial is a ChangeofMind trial
+    # - remote theta times around C-O-M time
+    # - parsed remote theta arm
+    -> TrialChoice
+    proportion: varchar(20)           # minimal amount of proportion the animal is in before it backed out
+    delta_t_minus: varchar(20)        # time in seconds, before change of mind that we look for theta decodes
+    delta_t_plus: varchar(20)         # time in seconds, after change of mind that we look for theta decodes
+    max_flag: int
+    ---
+    pandas = NULL: longblob            # pandas dataframe saved as dictionary, choice
+    """
+    def make(self,key,replace=False):
+        self.insert1(key,replace=replace)
+
+    
+    def fetch1_dataframe(self,key):
+        q = (ChangeofMindRemoteTheta() & key).fetch1("pandas")
+        df = pd.DataFrame.from_dict(q)
+        return df
 
 @schema
 class RippleTimes(dj.Manual):

@@ -30,7 +30,7 @@ from ripple_detection.detectors import Kay_ripple_detector
 
 from ripple_detection.core import segment_boolean_series
 from spyglass.shijiegu.helpers import mergeIntervals,interpolate_to_new_time
-from spyglass.shijiegu.Analysis_SGU import TrialChoice,DecodeResultsLinear,TetrodeNumber,EpochPos,RippleTimesWithDecode
+from spyglass.shijiegu.Analysis_SGU import TrialChoice,DecodeResultsLinear,TetrodeNumber,EpochPos,RippleTimesWithDecode,DecodeResults2D
 import spyglass.shijiegu as shijiegu
 from spyglass.shijiegu.ripple_detection import (loadRippleLFP_OneChannelPerElectrode,
                                                 removeDataBeforeTrial1,removeArrayDataBeforeTrial1,
@@ -107,7 +107,8 @@ def load_session_pos_names(nwb_copy_file_name):
 
 def load_epoch_data(nwb_copy_file_name,epoch_num,
                     classifier_param_name = 'default_decoding_gpu_4armMaze',
-                    decode_encoding_set = 'mobility_2Dheadspeed_above_6'):
+                    decode_encoding_set = 'mobility_2Dheadspeed_above_6',
+                    load_ripple_flag = True, load_spike_flag = False, use_1d_decode = True):
     # Load state script
     key={'nwb_file_name':nwb_copy_file_name,'epoch':epoch_num}
     log=(TrialChoice & key).fetch1('choice_reward')
@@ -118,7 +119,7 @@ def load_epoch_data(nwb_copy_file_name,epoch_num,
     log_df=pd.DataFrame(log)
 
     # load decode
-    decode=load_decode(nwb_copy_file_name,epoch_name,classifier_param_name,decode_encoding_set)
+    decode=load_decode(nwb_copy_file_name,epoch_name,classifier_param_name,decode_encoding_set, use_1d = use_1d_decode)
 
     # load position
     position_info=load_position(nwb_copy_file_name,epoch_pos_name)
@@ -154,37 +155,68 @@ def load_epoch_data(nwb_copy_file_name,epoch_num,
     theta_df=xr.Dataset.from_dataframe(theta_df)
 
     # load_ripple
-    ripple_data,ripple_timestamps,electrodes=load_ripple(nwb_copy_file_name,epoch_name)
-    ripple_df = pd.DataFrame(data=ripple_data[:,CA1TetrodeInd], index=ripple_timestamps)
-    ripple_df.index.name='time'
-    ripple_df=xr.Dataset.from_dataframe(ripple_df)
+    if load_ripple_flag:
+        ripple_data,ripple_timestamps,electrodes=load_ripple(nwb_copy_file_name,epoch_name)
+        ripple_df = pd.DataFrame(data=ripple_data[:,CA1TetrodeInd], index=ripple_timestamps)
+        ripple_df.index.name='time'
+        ripple_df=xr.Dataset.from_dataframe(ripple_df)
+    else:
+        ripple_df = None
 
     # load spikes
-    neural_data,neural_ts,mua_time,mua,channel_IDs=load_spike(nwb_copy_file_name,epoch_name)
-    mua_df = pd.DataFrame(data=mua, index=mua_time)
-    mua_df.index.name='time'
-    mua_df=xr.Dataset.from_dataframe(mua_df)
-
-    neural_df = pd.DataFrame(data=neural_data, index=neural_ts[0],columns=channel_IDs)
-    neural_df.index.name='time'
-    neural_df=xr.Dataset.from_dataframe(neural_df)
+    if load_spike_flag:
+        neural_data,neural_ts,mua_time,mua,channel_IDs=load_spike(nwb_copy_file_name,epoch_name)
+        mua_df = pd.DataFrame(data=mua, index=mua_time)
+        mua_df.index.name='time'
+        mua_df=xr.Dataset.from_dataframe(mua_df)
+        
+        neural_df = pd.DataFrame(data=neural_data, index=neural_ts[0],columns=channel_IDs)
+        neural_df.index.name='time'
+        neural_df=xr.Dataset.from_dataframe(neural_df)
+    else:
+        neural_df = None
+        mua_df = None
+        channel_IDs = np.array([])
 
     return epoch_name,log_df,decode,head_speed,head_orientation,linear_position_df,lfp_df,theta_df,ripple_df,neural_df,mua_df
 
 def load_decode(nwb_copy_file_name,interval_list_name,
                 classifier_param_name = 'default_decoding_gpu_4armMaze',
-                encoding_set = 'mobility_2Dheadspeed_above_6'):
-    #decoding_path=(Decode & {'nwb_file_name': nwb_copy_file_name,
-    #      'interval_list_name':interval_list_name}).fetch1('posterior')
-    decoding_path=(DecodeResultsLinear & {'nwb_file_name': nwb_copy_file_name,
-          'interval_list_name': interval_list_name,
-          'classifier_param_name': classifier_param_name,
-          'encoding_set': encoding_set}).fetch1('posterior')
-    decode= xr.open_dataset(decoding_path)
-    return decode
+                encoding_set = 'mobility_2Dheadspeed_above_6', use_1d = True):
+    # use_1d: if True, load 1d decoding results; if False, load 1d decoding results collapsed from 2D decoding.
+    
+    if use_1d:
+        decoding_path=(DecodeResultsLinear & {'nwb_file_name': nwb_copy_file_name,
+                        'interval_list_name': interval_list_name,
+                        'classifier_param_name': classifier_param_name,
+                        'encoding_set': encoding_set}).fetch1('posterior')
 
-def load_position(nwb_copy_file_name,interval_list_name):
-    position_info_param_name = 'default'
+        results1d = xr.open_dataset(decoding_path)
+        return results1d
+        
+    else:
+        entry = DecodeResults2D & {'nwb_file_name':nwb_copy_file_name,
+                                   'interval_list_name':interval_list_name,
+                                   'encoding_set': encoding_set}
+        # environment2D
+        #environment_path = entry.fetch1('classifier')
+        #with open(environment_path, 'rb') as file:
+        #    environment2D = pickle.load(file)
+
+        # decode_1d, decode_2d
+        decode_path1d = entry.fetch1('posterior_1d')
+        results1d = xr.open_zarr(decode_path1d, consolidated=False)
+
+        decode_path2d = entry.fetch1('posterior')
+        results2d = xr.open_zarr(decode_path2d, consolidated=False)
+
+        # sum across states
+        #posterior2d = results2d.sum("state")
+        #posterior1d = results1d.sum("state")
+                
+    return results1d#, results2d, posterior1d, posterior2d
+
+def load_position(nwb_copy_file_name,interval_list_name, position_info_param_name = 'default'):
     position_valid_times = (IntervalList & {'nwb_file_name': nwb_copy_file_name,
                                         'interval_list_name':interval_list_name}).fetch1('valid_times')
 
