@@ -53,7 +53,6 @@ from spyglass.common.common_behav import (
 from spyglass.common.common_interval import IntervalList
 from spyglass.common.common_nwbfile import AnalysisNwbfile
 from spyglass.common.common_position import IntervalPositionInfo
-from spyglass.decoding.utils import _get_peak_amplitude
 from spyglass.decoding.v0.core import (
     convert_valid_times_to_slice,
     get_valid_ephys_position_times_by_epoch,
@@ -76,6 +75,7 @@ from spyglass.spikesorting.v0.spikesorting_sorting import (
     SpikeSortingSelection,
 )
 from spyglass.utils.dj_mixin import SpyglassMixin
+from spyglass.utils.waveforms import _get_peak_amplitude
 
 schema = dj.schema("decoding_clusterless")
 
@@ -84,7 +84,7 @@ schema = dj.schema("decoding_clusterless")
 class MarkParameters(SpyglassMixin, dj.Manual):
     """Defines the type of waveform feature computed for a given spike time.
 
-    Parameters
+    Attributes
     ----------
     mark_param_name : str
         A name for this set of parameters
@@ -169,7 +169,10 @@ class UnitMarks(SpyglassMixin, dj.Computed):
             thresholds the waveform.
         4. Saves the marks as a TimeSeries object in a new AnalysisNwbfile.
         """
-        
+        # create a new AnalysisNwbfile and a timeseries for the marks and save
+        key["analysis_file_name"] = AnalysisNwbfile().create(
+            key["nwb_file_name"]
+        )
         # get the list of mark parameters
         mark_param = (MarkParameters & key).fetch1()
 
@@ -259,11 +262,11 @@ class UnitMarks(SpyglassMixin, dj.Computed):
             key["analysis_file_name"], nwb_object
         )
         AnalysisNwbfile().add(key["nwb_file_name"], key["analysis_file_name"])
-        AnalysisNwbfile().log(key, table=self.full_table_name)
         self.insert1(key)
 
     def fetch1_dataframe(self) -> pd.DataFrame:
         """Convenience function for returning the marks in a readable format"""
+        self.ensure_single_entry()
         return self.fetch_dataframe()[0]
 
     def fetch_dataframe(self) -> list[pd.DataFrame]:
@@ -486,6 +489,7 @@ class UnitMarksIndicator(SpyglassMixin, dj.Computed):
 
     def fetch1_dataframe(self) -> pd.DataFrame:
         """Convenience function for returning the first dataframe"""
+        _ = self.ensure_single_entry()
         return self.fetch_dataframe()[0]
 
     def fetch_dataframe(self) -> list[pd.DataFrame]:
@@ -537,7 +541,7 @@ class ClusterlessClassifierParameters(SpyglassMixin, dj.Manual):
     Decodes the animal's mental position and some category of interest
     from unclustered spikes and spike waveform features
 
-    Parameters
+    Attributes
     ----------
     classifier_param_name : str
     classifier_params: dict

@@ -29,6 +29,18 @@ from .data_downloader import DataDownloader
 # globals in pytest_configure:
 #     BASE_DIR, RAW_DIR, SERVER, TEARDOWN, VERBOSE, TEST_FILE, DOWNLOAD, NO_DLC
 
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.simplefilter("ignore", category=ResourceWarning)
+warnings.simplefilter("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", module="tensorflow")
+
+warnings.filterwarnings(
+    "ignore", category=MissingRequiredBuildWarning, module="hdmf"
+)
+warnings.filterwarnings("ignore", category=FutureWarning, module="sklearn")
+warnings.filterwarnings("ignore", category=PerformanceWarning, module="pandas")
+warnings.filterwarnings("ignore", category=NumbaWarning, module="numba")
+
 
 def pytest_addoption(parser):
     """Permit constants when calling pytest at command line
@@ -44,6 +56,8 @@ def pytest_addoption(parser):
     --no-teardown (bool): Default False. Delete pipeline on close.
     --no-docker (bool): Default False. Run datajoint mysql server in Docker.
     --no-dlc (bool): Default False. Skip DLC tests. Also skip video downloads.
+    --container-name (str): Default 'spyglass-pytest'. Docker container name.
+    --container-port (str): Default None (uses 330[mysql_version]). Port mapping.
     """
     parser.addoption(
         "--quiet-spy",
@@ -80,6 +94,20 @@ def pytest_addoption(parser):
         default=False,
         help="Skip downloads for and tests of DLC-dependent features.",
     )
+    parser.addoption(  # Allows for concurrency with other pytest runs
+        "--container-name",
+        action="store",
+        default="spyglass-pytest",
+        dest="container_name",
+        help="Docker container name for MySQL server.",
+    )
+    parser.addoption(  # Allows for concurrency with other pytest runs
+        "--container-port",
+        action="store",
+        default=None,
+        dest="container_port",
+        help="Port to map to MySQL's default 3306. Defaults to 330[mysql_version].",
+    )
 
 
 def pytest_configure(config):
@@ -88,7 +116,9 @@ def pytest_configure(config):
     TEST_FILE = "minirec20230622.nwb"
     TEARDOWN = not config.option.no_teardown
     VERBOSE = not config.option.quiet_spy
+
     NO_DLC = config.option.no_dlc
+    pytest.NO_DLC = NO_DLC
 
     BASE_DIR = Path(config.option.base_dir).absolute()
     BASE_DIR.mkdir(parents=True, exist_ok=True)
@@ -96,6 +126,8 @@ def pytest_configure(config):
     os.environ["SPYGLASS_BASE_DIR"] = str(BASE_DIR)
 
     SERVER = DockerMySQLManager(
+        container_name=config.option.container_name,
+        port=config.option.container_port,
         restart=TEARDOWN,
         shutdown=TEARDOWN,
         null_server=config.option.no_docker,
@@ -108,19 +140,6 @@ def pytest_configure(config):
         download_dlc=not NO_DLC,
     )
 
-    warnings.filterwarnings("ignore", module="tensorflow")
-    warnings.filterwarnings("ignore", category=UserWarning, module="hdmf")
-    warnings.filterwarnings(
-        "ignore", category=MissingRequiredBuildWarning, module="hdmf"
-    )
-    warnings.filterwarnings("ignore", category=FutureWarning, module="sklearn")
-    warnings.filterwarnings(
-        "ignore", category=PerformanceWarning, module="pandas"
-    )
-    warnings.filterwarnings("ignore", category=NumbaWarning, module="numba")
-    warnings.simplefilter("ignore", category=ResourceWarning)
-    warnings.simplefilter("ignore", category=DeprecationWarning)
-
 
 def pytest_unconfigure(config):
     from spyglass.utils.nwb_helper_fn import close_nwb_files
@@ -131,6 +150,8 @@ def pytest_unconfigure(config):
         analysis_dir = BASE_DIR / "analysis"
         for file in analysis_dir.glob("*.nwb"):
             file.unlink()
+        for subdir in ["export", "moseq", "recording", "spikesorting", "tmp"]:
+            shutil_rmtree(str(BASE_DIR / subdir), ignore_errors=True)
 
 
 # ---------------------------- FIXTURES, TEST ENV ----------------------------
@@ -188,19 +209,50 @@ def server_credentials(server):
 
 
 @pytest.fixture(scope="session")
-def dj_conn(request, server_credentials, verbose, teardown):
-    """Fixture for datajoint connection."""
-    config_file = "dj_local_conf.json_test"
+def worker_id(request):
+    """Get unique worker ID for pytest-xdist parallelization.
+
+    Returns 'master' for serial execution, or 'gwN' for parallel workers.
+    This enables worker-specific database schema isolation.
+    """
+    if hasattr(request.config, "workerinput"):
+        return request.config.workerinput["workerid"]
+    return "master"
+
+
+@pytest.fixture(scope="session")
+def dj_conn(request, server_credentials, worker_id, verbose, teardown):
+    """Fixture for datajoint connection with pytest-xdist support.
+
+    For parallel execution, each worker gets its own database schema prefix
+    to avoid race conditions and ensure test isolation.
+    """
+    # Worker-specific config file to avoid conflicts
+    config_file = f"dj_local_conf.json_test_{worker_id}"
     if Path(config_file).exists():
         os.remove(config_file)
 
+    # Set worker-specific schema prefix for database isolation
+    schema_prefix = f"test_spyglass_{worker_id}_"
+
     dj.config.update(server_credentials)
     dj.config["loglevel"] = "INFO" if verbose else "ERROR"
+    dj.config["database.prefix"] = schema_prefix
     dj.config["custom"]["spyglass_dirs"] = {"base": str(BASE_DIR)}
     dj.config.save(config_file)
     dj.conn()
+
     yield dj.conn()
+
+    # Cleanup: drop worker-specific schemas if tearing down
     if teardown:
+        conn = dj.conn()
+        cursor = conn.query(f"SHOW DATABASES LIKE '{schema_prefix}%%'")
+        schemas = cursor.fetchall()
+        for schema in schemas:
+            dj_logger.info(f"Dropping worker schema: {schema[0]}")
+            conn.query(f"DROP DATABASE IF EXISTS `{schema[0]}`")
+
         if Path(config_file).exists():
             os.remove(config_file)
 
@@ -235,12 +287,10 @@ def no_dlc(request):
     yield NO_DLC
 
 
-@pytest.fixture(scope="session")
-def skipif_no_dlc(request):
-    if NO_DLC:
-        yield pytest.mark.skip(reason="Skipping DLC-dependent tests.")
-    else:
-        yield
+skip_if_no_dlc = pytest.mark.skipif(
+    condition=lambda: getattr(pytest, "NO_DLC", False),
+    reason="Skipping DLC-dependent tests.",
+)
 
 
 @pytest.fixture(scope="session")
@@ -285,7 +335,7 @@ def load_config(dj_conn, base_dir):
 
 @pytest.fixture(autouse=True, scope="session")
 def mini_insert(
-    dj_conn, mini_path, mini_content, teardown, server, load_config
+    dj_conn, mini_path, mini_content, teardown, server, load_config, mini_dict
 ):
     from spyglass.common import LabMember, Nwbfile, Session  # noqa: E402
     from spyglass.data_import import insert_sessions  # noqa: E402
@@ -306,10 +356,13 @@ def mini_insert(
     if not server.connected:
         raise ConnectionError("No server connection.")
 
-    if len(Nwbfile()) != 0:
+    if len(Nwbfile & mini_dict) != 0:
         dj_logger.warning("Skipping insert, use existing data.")
     else:
-        insert_sessions(mini_path.name, raise_err=True)
+        try:
+            insert_sessions(mini_path.name, raise_err=True)
+        except Exception as e:  # If can't insert session, exit all tests
+            pytest.exit(f"Failed to insert sessions: {e}")
 
     if len(Session()) == 0:
         raise ValueError("No sessions inserted.")
@@ -397,6 +450,14 @@ def populate_exception():
 
 
 @pytest.fixture(scope="session")
+def utils():
+    """Spyglass utils module."""
+    from spyglass import utils
+
+    yield utils
+
+
+@pytest.fixture(scope="session")
 def frequent_imports():
     """Often needed for graph cascade."""
     from spyglass.decoding.v0.clusterless import UnitMarksIndicatorSelection
@@ -470,7 +531,7 @@ def trodes_params(trodes_params_table, teardown):
             "params": {
                 **params,
                 "is_upsampled": 1,
-                "upsampling_sampling_rate": 500,  # TODO - lower this to speed up
+                "upsampling_sampling_rate": 50,
             },
         },
     }
@@ -795,6 +856,7 @@ def add_electrode_group(
         nwb_file_name=mini_copy_name,
         group_name=group_name,
         electrode_list=np.array(lfp_constants.get("lfp_electrode_ids")),
+        skip_duplicates=True,
     )
     assert len(
         electrodegroup_table & {"lfp_electrode_group_name": group_name}
@@ -1037,13 +1099,15 @@ def model_train_key(sgp, project_key, training_params_key):
         **project_key,
         **training_params_key,
     }
-    sgp.v1.DLCModelTrainingSelection().insert1(
-        {
-            **model_train_key,
-            "model_prefix": "",
-        },
-        skip_duplicates=True,
-    )
+    train_tbl = sgp.v1.DLCModelTrainingSelection()
+    if not train_tbl & model_train_key:
+        sgp.v1.DLCModelTrainingSelection().insert1(
+            {
+                **model_train_key,
+                "model_prefix": "",
+            },
+            skip_duplicates=True,
+        )
     yield model_train_key
 
 
@@ -1064,7 +1128,7 @@ def model_source_key(sgp, model_train_key, populate_training):
 
     _ = populate_training
 
-    yield (sgp.v1.DLCModelSource & model_train_key).fetch("KEY")[0]
+    yield (sgp.v1.DLCModelSource & 'dlc_model_name like "pyt%"').fetch("KEY")[0]
 
 
 @pytest.fixture(scope="session")
@@ -1078,25 +1142,36 @@ def model_key(sgp, model_source_key):
 @pytest.fixture(scope="session")
 def populate_model(sgp, model_key):
     model_tbl = sgp.v1.DLCModel
-    if model_tbl & model_key:
-        yield
+    restricted = model_tbl & model_key
+    if restricted:
+        yield restricted
     else:
-        sgp.v1.DLCModel.populate(model_key)
-        yield
+        model_tbl.populate(model_key)
+        yield model_tbl & model_key
 
 
 @pytest.fixture(scope="session")
 def pose_estimation_key(sgp, mini_copy_name, populate_model, model_key):
-    yield sgp.v1.DLCPoseEstimationSelection().insert_estimation_task(
-        {
-            "nwb_file_name": mini_copy_name,
-            "epoch": 1,
-            "video_file_num": 0,
-            **model_key,
-        },
-        task_mode="trigger",  # trigger or load
-        params={"gputouse": None, "videotype": "mp4", "TFGPUinference": False},
-    )
+    key = {
+        "nwb_file_name": mini_copy_name,
+        "epoch": 1,
+        "video_file_num": 0,
+        **model_key,
+    }
+
+    sel_tbl = sgp.v1.DLCPoseEstimationSelection()
+    if not sel_tbl & key:
+        sel_tbl.insert_estimation_task(
+            key=key,
+            task_mode="trigger",  # trigger or load
+            params={
+                "gputouse": None,
+                "videotype": "mp4",
+                "TFGPUinference": False,
+            },
+            check_crop=True,
+        )
+    yield dict(key, task_mode="trigger")
 
 
 @pytest.fixture(scope="session")
@@ -1111,21 +1186,19 @@ def populate_pose_estimation(sgp, pose_estimation_key):
 def si_params_name(sgp, populate_pose_estimation):
     params_name = "low_bar"
     params_tbl = sgp.v1.DLCSmoothInterpParams
-    # if len(params_tbl & {"dlc_si_params_name": params_name}) < 1:
-    if True:  # TODO: remove before merge
-        nan_params = params_tbl.get_nan_params()
-        nan_params["dlc_si_params_name"] = params_name
-        nan_params["params"].update(
-            {
-                "likelihood_thresh": 0.4,
-                "max_cm_between_pts": 100,
-                "num_inds_to_span": 50,
-                # Smoothing and Interpolation added later - must check
-                "smoothing_params": {"smoothing_duration": 0.05},
-                "interp_params": {"max_cm_to_interp": 100},
-            }
-        )
-        params_tbl.insert1(nan_params, skip_duplicates=True)
+    nan_params = params_tbl.get_nan_params()
+    nan_params["dlc_si_params_name"] = params_name
+    nan_params["params"].update(
+        {
+            "likelihood_thresh": 0.4,
+            "max_cm_between_pts": 100,
+            "num_inds_to_span": 50,
+            # Smoothing and Interpolation added later - must check
+            "smoothing_params": {"smoothing_duration": 0.05},
+            "interp_params": {"max_cm_to_interp": 100},
+        }
+    )
+    params_tbl.insert1(nan_params, skip_duplicates=True)
 
     yield params_name
 
@@ -1158,21 +1231,23 @@ def populate_si(sgp, si_key, populate_pose_estimation):
 
 
 @pytest.fixture(scope="session")
-def cohort_selection(sgp, si_key, si_params_name):
+def cohort_selection(sgp, si_key, populate_si, si_params_name):
+    _ = populate_si
+    sel_tbl = sgp.v1.DLCSmoothInterpCohortSelection()
+    sel_pk = dict(dlc_si_cohort_selection_name="whiteLED")
     cohort_key = {
         k: v
         for k, v in {
             **si_key,
-            "dlc_si_cohort_selection_name": "whiteLED",
-            "bodyparts_params_dict": {
-                "whiteLED": si_params_name,
-            },
+            **sel_pk,
+            "bodyparts_params_dict": {"whiteLED": si_params_name},
         }.items()
         if k not in ["bodypart", "dlc_si_params_name"]
     }
-    sgp.v1.DLCSmoothInterpCohortSelection().insert1(
-        cohort_key, skip_duplicates=True
-    )
+    sel_tbl.insert1(cohort_key, skip_duplicates=True)
+    if not sel_tbl & sel_pk:
+        raise ValueError("Cohort not inserted.")
+
     yield cohort_key
 
 
@@ -1180,7 +1255,10 @@ def cohort_selection(sgp, si_key, si_params_name):
 def cohort_key(sgp, cohort_selection, populate_si):
     cohort_tbl = sgp.v1.DLCSmoothInterpCohort()
     cohort_tbl.populate(cohort_selection)
-    yield cohort_tbl.fetch("KEY", as_dict=True)[0]
+    query = cohort_tbl & cohort_selection
+    if not query:
+        raise ValueError("Cohort not populated.")
+    yield query.fetch("KEY", as_dict=True)[0]
 
 
 @pytest.fixture(scope="session")
@@ -1251,14 +1329,21 @@ def orient_params(sgp):
 
 
 @pytest.fixture(scope="session")
-def orient_selection(sgp, cohort_key, orient_params):
+def orient_selection(sgp, cohort_key, orient_params, cohort_selection):
+    _ = cohort_selection
+    # No idea why this isn't running above, but fails half the time
+    sgp.v1.DLCSmoothInterpCohortSelection().insert1(
+        cohort_selection, skip_duplicates=True
+    )
+    sgp.v1.DLCSmoothInterpCohort().populate(cohort_key)
+    sel_tbl = sgp.v1.DLCOrientationSelection()
     orient_key = {
         key: val
         for key, val in cohort_key.items()
-        if key in sgp.v1.DLCOrientationSelection.primary_key
+        if key in sel_tbl.primary_key
     }
     orient_key.update(orient_params)
-    sgp.v1.DLCOrientationSelection().insert1(orient_key, skip_duplicates=True)
+    sel_tbl.insert1(orient_key, skip_duplicates=True)
     yield orient_key
 
 
@@ -1270,7 +1355,7 @@ def orient_key(sgp, orient_selection):
 @pytest.fixture(scope="session")
 def populate_orient(sgp, orient_selection):
     sgp.v1.DLCOrientation().populate(orient_selection)
-    yield
+    yield sgp.v1.DLCOrientation() & orient_selection
 
 
 @pytest.fixture(scope="session")
@@ -1320,6 +1405,13 @@ def spike_v1(common):
     from spyglass.spikesorting import v1
 
     yield v1
+
+
+@pytest.fixture(scope="session")
+def imported_spike(common):
+    from spyglass.spikesorting import imported
+
+    yield imported
 
 
 @pytest.fixture(scope="session")
@@ -1493,3 +1585,11 @@ def pop_spikes_group(
         unit_filter_params_name="default_exclusion",
     )
     yield spike_v1_group.SortedSpikesGroup().fetch("KEY", as_dict=True)[0]
+
+
+@pytest.fixture(scope="session")
+def user_env_tbl(common):
+    """Fixture to access the UserEnvironment table."""
+    tbl = common.UserEnvironment()
+    tbl.insert_current_env()
+    yield tbl

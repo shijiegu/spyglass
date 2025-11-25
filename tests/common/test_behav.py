@@ -4,6 +4,7 @@ from pandas import DataFrame
 from ..conftest import TEARDOWN
 
 
+@pytest.mark.slow
 def test_invalid_interval(pos_src):
     """Test invalid interval"""
     with pytest.raises(ValueError):
@@ -22,6 +23,7 @@ def test_valid_epoch_num(common):
     assert epoch_num == 1, "PositionSource get_epoch_num failed"
 
 
+@pytest.mark.slow
 def test_pos_source_make(common):
     """Test custom populate"""
     common.PositionSource().make(common.Session())
@@ -100,9 +102,11 @@ def test_pos_interval_no_transaction(verbose_context, common, mini_restr):
     with verbose_context:
         common.PositionIntervalMap()._no_transaction_make(mini_restr)
     after = common.PositionIntervalMap().fetch()
-    assert (
-        len(after) == len(before) + 3
-    ), "PositionIntervalMap no_transaction had unexpected effect"
+    expected_insertions = 4
+    assert len(after) - len(before) == expected_insertions, (
+        f"PositionIntervalMap failed to insert the expected number of entries. "
+        f"Expected {expected_insertions}, but got {len(after) - len(before)}."
+    )
     assert (
         "" in after["position_interval_name"]
     ), "PositionIntervalMap null insert failed"

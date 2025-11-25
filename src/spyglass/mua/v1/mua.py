@@ -20,7 +20,7 @@ schema = dj.schema("mua_v1")
 class MuaEventsParameters(SpyglassMixin, dj.Manual):
     """Params to extract times of high multiunit activity during immobility.
 
-    Parameters
+    Attributes
     ----------
     mua_param_name : str
         A name for this set of parameters
@@ -128,6 +128,7 @@ class MuaEventsV1(SpyglassMixin, dj.Computed):
 
     def fetch1_dataframe(self):
         """Convenience function for returning the marks in a readable format"""
+        _ = self.ensure_single_entry()
         return self.fetch_dataframe()[0]
 
     def fetch_dataframe(self) -> list[DataFrame]:

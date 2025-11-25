@@ -67,11 +67,26 @@ class ActivityLog(dj.Manual):
     """
 
     @classmethod
-    def deprecate_log(cls, name, warning=True) -> None:
-        """Log a deprecation warning for a feature."""
+    def deprecate_log(cls, name, alt=None, warning=True) -> None:
+        """Log a deprecation warning for a feature.
+
+        Parameters
+        ----------
+        name : str
+            The name of the feature to deprecate.
+        alt : str, optional
+            What to use instead. Default no such message.
+        warning : bool, optional
+            Whether to log a warning. Default is True.
+        """
         if warning:
-            logger.warning(f"DEPRECATION scheduled for version 0.6: {name}")
-        cls.insert1(dict(dj_user=dj.config["database.user"], function=name))
+            msg = f"\n\tUse {alt} instead" if alt else ""
+            logger.warning(
+                f"DEPRECATION scheduled for Spyglass 0.6.0: {name}{msg}"
+            )
+        cls.insert1(
+            dict(dj_user=dj.config["database.user"], function=name[:64])
+        )
 
 
 @schema
@@ -212,7 +227,7 @@ class ExportSelection(SpyglassMixin, dj.Manual):
         restr_graph : RestrGraph
             The updated RestrGraph
         """
-
+        # only add items if found respective file types
         if raw_files := self._list_raw_files(key):
             raw_tbl = self._externals["raw"]
             raw_name = raw_tbl.full_table_name
@@ -369,12 +384,16 @@ class Export(SpyglassMixin, dj.Computed):
                 (self.Table & id_dict).delete_quick()
                 (self.Table & id_dict).delete_quick()
 
+        logger.debug(f"Building restr graph for export {key['export_id']}")
         restr_graph = ExportSelection().get_restr_graph(paper_key)
+
         # Original plus upstream files
+        logger.debug("Collecting file paths from export selection")
         file_paths = {
             *query.list_file_paths(paper_key, as_dict=False),
             *restr_graph.file_paths,
         }
+        logger.debug(f"Found {len(file_paths)} total files to export")
 
         # Check for linked nwb objects and add them to the export
         unlinked_files = set()
@@ -388,12 +407,17 @@ class Export(SpyglassMixin, dj.Computed):
                 + f" and including {links} instead"
             )
             unlinked_files.update(links)
-        file_paths = unlinked_files  # TODO: what if linked items have links?
+        file_paths = unlinked_files
 
+        table_count = len(restr_graph.as_dict)
+        logger.debug(f"Preparing {table_count} table entries for export")
         table_inserts = [
             {**key, **rd, "table_id": i}
             for i, rd in enumerate(restr_graph.as_dict)
         ]
+
+        file_count = len(file_paths)
+        logger.debug(f"Preparing {file_count} file entries for export")
         file_inserts = [
             {**key, "file_path": fp, "file_id": i}
             for i, fp in enumerate(file_paths)
@@ -410,12 +434,19 @@ class Export(SpyglassMixin, dj.Computed):
             msg="Must use same Spyglass version for analysis and export",
         )
 
+        logger.debug("Writing MySQL dump for export")
         sql_helper = SQLDumpHelper(**paper_key, spyglass_version=version_ids[0])
         sql_helper.write_mysqldump(free_tables=restr_graph.restr_ft)
 
+        logger.debug("Inserting export metadata into database")
         self.insert1({**key, **paper_key})
         self.Table().insert(table_inserts)
         self.File().insert(file_inserts)
+
+        logger.info(
+            f"Export {key['export_id']} completed successfully: "
+            f"{table_count} tables, {file_count} files"
+        )
 
     def prepare_files_for_export(self, key, **kwargs):
         """Resolve common known errors to make a set of analysis

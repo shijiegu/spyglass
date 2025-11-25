@@ -49,6 +49,13 @@ should be fetched from `Nwbfile` or an analysis file should be fetched from
 `AnalysisNwbfile`. If neither is foreign-key-referenced, the function will refer
 to a `_nwb_table` attribute.
 
+**Custom Analysis File Tables**: Spyglass supports individualized
+`AnalysisNwbfile` tables to address transaction lock contention in multi-team
+environments. The `fetch_nwb()` method automatically detects whether your table
+references the common `AnalysisNwbfile` table or a custom team-specific table
+and fetches from the appropriate location. See [Custom Analysis Tables](../ForDevelopers/Management.md#custom-analysis-tables)
+for details on using custom analysis file tables.
+
 ## Long-Distance Restrictions
 
 In complicated pipelines like Spyglass, there are often tables that 'bury' their
@@ -102,6 +109,83 @@ my_table << upstream_restriction >> downstream_restriction
 
 When providing a restriction of the parent, use 'up' direction. When providing a
 restriction of the child, use 'down' direction.
+
+For a more concrete example, imagine that we want to know which entries in the
+`BurstPair` table have a `1` in the `session_id`. The DataJoint-native way to
+approach this is to manually figure out the path from `Session` -> `Raw` ... ->
+`BurstPair` by looking at the diagram, or using various graph-structure
+methods: `parents`, `children`, `ancestors`, and `descendants`. We then use the
+`*` join operator for each link in the chain. Because there are some clashing
+secondary keys, we would need to drop them with `proj()`.
+
+```python
+from spyglass.common import Raw, Session
+from spyglass.spikesorting.v1 import (
+    BurstPair,
+    BurstPairSelection,
+    CurationV1,
+    MetricCuration,
+    MetricCurationSelection,
+    SpikeSorting,
+    SpikeSortingRecording,
+    SpikeSortingRecordingSelection,
+    SpikeSortingSelection,
+)
+
+join = (
+    (
+        (
+            (Session * Raw).proj()
+            * SpikeSortingRecordingSelection
+            * SpikeSortingRecording
+        ).proj()
+        * SpikeSortingSelection
+        * SpikeSorting
+    ).proj()
+    * CurationV1
+    * MetricCurationSelection
+).proj() * (
+    MetricCuration * BurstPairSelection * BurstPair
+) * Session & "session_id LIKE '%1%'" # Last join adds back secondary keys
+```
+
+- **Pros:**
+    - Reliable - will not break if new tables are added elsewhere
+    - Fast - deterministic computational process, no guess-and-check
+    - All primary keys present, so it's easier to fetch other attributes
+- **Cons:**
+    - Effortful - for long pipelines, takes time to find the path and then add
+    relevant parentheses and `proj`
+    - Inconvenient for one-off queries
+
+Instead, we can use the long-distance operator, or the equivalent `restrict_by`
+method to restrict the current table. By default, `verbose` and `return_graph`
+are false. When turned on, these display the search process and return the
+`RestrGraph` object, respectively. The graph object can be used to look at
+the path or check the same restriction at midpoints.
+
+```python
+from spyglass.spikesorting.v1 import BurstPair
+
+burst_tbl = BurstPair()
+by_operator = burst_tbl << "session_id LIKE '%1%'"
+restr_graph = burst_tbl.restrict_by(
+    "session_id LIKE '%1%'", direction="up", verbose=True, return_graph=True
+)
+restr_graph.path  # see the list of tables in the path
+restr_graph.all_ft  # see each table as restricted by session_restr
+```
+
+- **Pros:**
+    - Easy to write
+    - Easier to read - the result is a restriction on the current table, not
+      including any additional primary keys.
+- **Cons:**
+    - Slow - ~10x processing time to run restriction compatibility checks
+    - Unreliable - may not traverse multi-directional paths (i.e., parent ->
+      child -> other-parent)
+    - False negatives - may show no results if the discovered path does not
+      follow the data provenance
 
 ## Delete Permission Checks
 

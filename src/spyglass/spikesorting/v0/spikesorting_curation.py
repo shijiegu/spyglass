@@ -12,11 +12,17 @@ import numpy as np
 import spikeinterface as si
 from packaging import version
 
-if version.parse(si.__version__) < version.parse("0.99.1"):
+from spyglass.common import LabMember
+
+if not LabMember().user_is_admin and version.parse(
+    si.__version__
+) < version.parse("0.99.1"):
+    # Allow admin to bypass version check for recompute purposes
     raise ImportError(
         "SpikeInterface version must updated. "
         + "Please run `pip install spikeinterface==0.99.1` to update."
     )
+
 import spikeinterface.preprocessing as sip
 import spikeinterface.qualitymetrics as sq
 
@@ -167,8 +173,7 @@ class Curation(SpyglassMixin, dj.Manual):
         recording_extractor : spike interface recording extractor
 
         """
-        recording_path = (SpikeSortingRecording & key).fetch1("recording_path")
-        return si.load_extractor(recording_path)
+        return SpikeSortingRecording().load_recording(key)
 
     @staticmethod
     def get_curated_sorting(key: dict):
@@ -282,7 +287,7 @@ class Curation(SpyglassMixin, dj.Manual):
 class WaveformParameters(SpyglassMixin, dj.Manual):
     """Parameters for extracting waveforms from a sorting extractor
 
-    Parameters
+    Attributes
     ----------
     waveform_params_name : str
         Name of the waveform extraction parameters
@@ -357,7 +362,7 @@ class Waveforms(SpyglassMixin, dj.Computed):
         3. Generates an analysis NWB file with the waveforms
         4. Inserts the key into Waveforms table
         """
-        key["analysis_file_name"] = AnalysisNwbfile().create(  # logged
+        key["analysis_file_name"] = AnalysisNwbfile().create(
             key["nwb_file_name"]
         )
         recording = Curation.get_recording(key)
@@ -391,7 +396,6 @@ class Waveforms(SpyglassMixin, dj.Computed):
         key["waveforms_object_id"] = object_id
         AnalysisNwbfile().add(key["nwb_file_name"], key["analysis_file_name"])
 
-        AnalysisNwbfile().log(key, table=self.full_table_name)
         self.insert1(key)
 
     def load_waveforms(self, key: dict):
@@ -564,9 +568,7 @@ class QualityMetrics(SpyglassMixin, dj.Computed):
         3. Generates an analysis NWB file with the metrics.
         4. Inserts the key into QualityMetrics table
         """
-        analysis_file_name = AnalysisNwbfile().create(  # logged
-            key["nwb_file_name"]
-        )
+        analysis_file_name = AnalysisNwbfile().create(key["nwb_file_name"])
         waveform_extractor = Waveforms().load_waveforms(key)
         key["analysis_file_name"] = (
             analysis_file_name  # add to key here to prevent fetch errors
@@ -590,7 +592,6 @@ class QualityMetrics(SpyglassMixin, dj.Computed):
             key["analysis_file_name"], metrics=qm
         )
         AnalysisNwbfile().add(key["nwb_file_name"], key["analysis_file_name"])
-        AnalysisNwbfile().log(key, table=self.full_table_name)
 
         self.insert1(key)
 
@@ -734,7 +735,7 @@ _metric_name_to_func = {
 class AutomaticCurationParameters(SpyglassMixin, dj.Manual):
     """Parameters for automatic curation of spike sorting
 
-    Parameters
+    Attributes
     ----------
     auto_curation_params_name : str
         Name of the automatic curation parameters
@@ -1019,7 +1020,6 @@ class CuratedSpikeSorting(SpyglassMixin, dj.Computed):
         2. Saves the sorting in an analysis NWB file
         3. Inserts key into CuratedSpikeSorting table and units into part table.
         """
-        AnalysisNwbfile()._creation_times["pre_create_time"] = time.time()
         unit_labels_to_remove = ["reject"]
         # check that the Curation has metrics
         metrics = (Curation & key).fetch1("quality_metrics")
@@ -1090,7 +1090,6 @@ class CuratedSpikeSorting(SpyglassMixin, dj.Computed):
             labels=labels,
         )
 
-        AnalysisNwbfile().log(key, table=self.full_table_name)
         self.insert1(key)
 
         # now add the units
