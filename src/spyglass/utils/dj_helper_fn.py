@@ -343,7 +343,7 @@ def fetch_nwb(query_expression, nwb_master, *attrs, **kwargs):
     )
 
     for file_name in nwb_files:
-        file_path = file_path_fn(file_name, from_schema=True)
+        file_path = file_path_fn(file_name)#, from_schema=True)
         if not os.path.exists(file_path):
             # get from kachery/dandi or recompute, store in cache
             get_nwb_file(file_path, query_expression)

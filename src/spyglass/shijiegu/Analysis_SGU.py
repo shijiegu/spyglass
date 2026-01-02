@@ -146,12 +146,26 @@ class MUA(dj.Manual):
     mean = 0: double  # mean
     sd = 0: double #sd
     """
+
+    
+@schema
+class MUATheta(dj.Manual):
+    definition = """
+    # theta from sorted pyramidal cells
+    -> TaskEpoch
+    data_type: varchar(32)  # sorted_pyramidal, unsorted_mua, sorted_all, lfp
+    ---
+    theta_xr = NULL: blob   # theta table
+    """
+    
     
 @schema
 class SingleUnit(dj.Manual):
     definition = """
     # Single Unit record
-    -> IntervalList
+    -> TaskEpoch
+    sorter: varchar(64)  # spike sorter name
+    curation_id: int  #
     ---
     cell_type_pd = NULL: longblob  # firing_rate, ac_mean, spike_width, classification
     """

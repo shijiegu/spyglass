@@ -36,10 +36,7 @@ def find_COM_transitions(animal, dates_to_plot, proportion_threshold = 0.1, near
             info = ChangeofMind().fetch1_dataframe(q)
             
             # load position info
-            linear_position_info = (IntervalLinearizedPosition & {"nwb_file_name":nwb_copy_file_name, 
-                                                "position_info_param_name": "default",
-                                                "interval_list_name":pos_name}).fetch1_dataframe()
-            P, P_wouldhave = info2matrix(info, linear_position_info, nearby = nearby)
+            P, P_wouldhave = info2matrix(info, nearby = nearby)
             P_day += P
             P_wouldhave_day += P_wouldhave
         
@@ -48,7 +45,7 @@ def find_COM_transitions(animal, dates_to_plot, proportion_threshold = 0.1, near
 
     return P_all, P_wouldhave_all
 
-def info2matrix(info, linear_position_info, nearby = False):
+def info2matrix(info, nearby = False):
     """Considering only the first change of mind"""
     P = np.zeros((4,4))
     P_wouldhave = np.zeros((4,4))

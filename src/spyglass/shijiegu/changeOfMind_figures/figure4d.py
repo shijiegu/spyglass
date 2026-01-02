@@ -10,15 +10,19 @@ from spyglass.common.common_position import TrackGraph, IntervalLinearizedPositi
 
 from spyglass.shijiegu.decodeHelpers import session2position_name
 from spyglass.shijiegu.changeOfMind_remote_interval import load_remote_animal, loc1d_to_2d_vector, find_angle
-from spyglass.shijiegu.Analysis_SGU import ChangeofMind
+from spyglass.shijiegu.Analysis_SGU import ChangeofMind, ChangeofMindRemoteTheta, MUATheta, ChangeofMindTheta
 from spyglass.shijiegu.changeOfMind_triggered import (seq2, rev2, rev3, seq1, rev1,
                                                       form_null_model,
                                                       find_large_position_minus_decode_trials_lightweight, find_large_position_minus_decode_trials)
 from spyglass.shijiegu.changeOfMind_triggered_position import load_triggered_position_decode_day
 from spyglass.shijiegu.changeOfMind_helper import unique_stable, setdiff1d_stable
+from spyglass.shijiegu.gyroscope import load_tracking_result, load_tracking_data_position
+from spyglass.shijiegu.helpers import interpolate_to_new_time
 
 same_side_map = {1:[2],2:[1],3:[4],4:[3]} 
 switch_side_map = {1:[3,4],2:[3,4],3:[1,2],4:[1,2]} 
+
+output_folder = '/stelmo/shijie/gyro/'
 
 def find_remote_theta_dynamics_animal(animal,list_of_days,classifier_param_name,encoding_set,
                              proportion = 0.05, use_1d = 1,
@@ -173,7 +177,8 @@ def find_remote_theta_dynamics_animal(animal,list_of_days,classifier_param_name,
         
     return remote_event_intervals, long_theta_intervals, event_info
 
-def find_angle_animal(animal, list_of_days, encoding_set, classifier_param_name, proportion, use_1d, debug = False):
+def find_angle_animal(animal, list_of_days, list_of_days_to_process, encoding_set,
+                      classifier_param_name, proportion, use_1d = 1, debug = False, use_gyro = True):
     loaded_data = load_remote_animal(
         animal, list_of_days,
         encoding_set,
@@ -202,35 +207,50 @@ def find_angle_animal(animal, list_of_days, encoding_set, classifier_param_name,
         # 4. compute the cosine v1 = head direction v2 = animal -> 2D location
     
         nwb_copy_file_name, session_name, trialID = info_animal[ind]
+        day = nwb_copy_file_name[5:13]
+        if day not in list_of_days_to_process:
+            continue
         t0, t1 = time_intervals_animal[ind][0]
         arm_identity = arm_identities_animal[ind][0]
         
         # 1. Get decode and animal head direction
         if session_name != session_name_old or nwb_copy_file_name_old != nwb_copy_file_name:
-            session_name_old = session_name
-            nwb_copy_file_name_old = nwb_copy_file_name
+            
             decode = load_decode(nwb_copy_file_name,session_name,classifier_param_name,encoding_set)
             position_axis = np.array(decode.coords['position'])
             
             # 1.1. get decode and animal head direction
             position_name = session2position_name(nwb_copy_file_name, session_name)
-            position_info = (IntervalPositionInfo() & {
-                            'nwb_file_name':nwb_copy_file_name,
-                            'interval_list_name':position_name,
-                            'position_info_param_name':'default_decoding'}).fetch1_dataframe()
-            position_info1d = (IntervalLinearizedPosition() & {
-                            'nwb_file_name':nwb_copy_file_name,
-                            'interval_list_name':position_name,
-                            'position_info_param_name':'default_decoding'}).fetch1_dataframe() #for debug use only
+            if not use_gyro:
+                position_info = (IntervalPositionInfo() & {
+                                'nwb_file_name':nwb_copy_file_name,
+                                'interval_list_name':position_name,
+                                'position_info_param_name':'default_decoding'}).fetch1_dataframe()
+                # position_info1d = (IntervalLinearizedPosition() & {
+                #                 'nwb_file_name':nwb_copy_file_name,
+                #                 'interval_list_name':position_name,
+                #                 'position_info_param_name':'default_decoding'}).fetch1_dataframe() #for debug use only
+            else: # use gyro integrated data
+                nwb_file_name = nwb_copy_file_name.replace('_.nwb','.nwb')
+                position_info = load_tracking_result(output_folder, nwb_file_name, session_name, int(trialID[0]))
+                if position_info is None:
+                    continue
+                position_info = interpolate_to_new_time(
+                    position_info,
+                    decode.time.values)
+            session_name_old = session_name
+            nwb_copy_file_name_old = nwb_copy_file_name
         
         pos2d_subset = select_subset_helper_pd(position_info,(t0,t1))
         head_orientation = np.array(pos2d_subset.head_orientation)
         animal_location = np.hstack((np.array(pos2d_subset.head_position_x).reshape(-1,1),np.array(pos2d_subset.head_position_y).reshape(-1,1)))
         
-        pos1d_subset = select_subset_helper_pd(position_info1d,(t0,t1))#for debug use only
+        #pos1d_subset = select_subset_helper_pd(position_info1d,(t0,t1))#for debug use only
 
         decode_subset = select_subset_helper(decode,(t0,t1),target_len = len(pos2d_subset),
                                                 epsilon = 0.001)
+        
+        #assert 1 == 0
         # 2. find max decode location during that interval
         posterior_position_subset = decode_subset.causal_posterior.sum(dim='state') #causal decoder
         if len(decode_subset.time) != len(pos2d_subset):
@@ -238,14 +258,15 @@ def find_angle_animal(animal, list_of_days, encoding_set, classifier_param_name,
         max_posterior_1d = np.array(position_axis[posterior_position_subset.argmax(dim = 'position')])
 
         # 3. translate location to 2D location
-        max_posterior_2d = loc1d_to_2d_vector(max_posterior_1d, arm_identity) #exclude posterior1d in arm_identity
+        max_posterior_2d = loc1d_to_2d_vector(max_posterior_1d, None) #exclude posterior1d in arm_identity
         # 4. compute the cosine v1 = head direction v2 = animal -> 2D location
-        angle = np.nanmean(find_angle(max_posterior_2d, head_orientation, animal_location))
+        angles_, v1, v2 = find_angle(max_posterior_2d, head_orientation, animal_location)
+        angle = np.nanmean(angles_)
         angles.append(angle)
     
-    if debug:
-        return angles, max_posterior_2d, head_orientation, animal_location
-    return angles
+    #if debug:
+    return angles, v1, v2, max_posterior_2d, head_orientation, animal_location
+    #return angles
 
 def find_choice_animal(animal, list_of_days, encoding_set, classifier_param_name, proportion, use_1d, debug = False):
     # for each remote interval, 
@@ -484,4 +505,52 @@ def arm_to_features(arms, feature_dict):
     
     return features, response
     
+    
+def time_to_phase(theta_df, time_array):
+    phase_array = np.interp(time_array,
+                            theta_df['time'],
+                            theta_df['phase'])
+    return phase_array
+
+
+def remote_phase(nwb_copy_file_name, session_name, long_flag = False, data_type = "mua"):
+    # data_type: "mua" or "corpus_callosum" or "sorted_pyramidal"
+    
+    phase_start_all = []
+    phase_end_all = []
+
+    # load long theta table
+    if long_flag: #local long theta table
+        pandas = (ChangeofMindTheta() & {"nwb_file_name":nwb_copy_file_name,
+                                         "delta_t_minus":5,
+                                        "delta_t_plus":5,
+                                        "epoch":str(session_name[:2]),
+                                        "max_flag":1}).fetch1("pandas")
+        log_df = pd.DataFrame(pandas)
+        log_df =log_df[log_df.long_theta]
+        colname = 'long_theta_intervals'
+    else: # remote theta table
+        pandas = (ChangeofMindRemoteTheta() & {"nwb_file_name":nwb_copy_file_name,
+                                        "epoch":str(session_name[:2])}).fetch1("pandas")
+        log_df = pd.DataFrame(pandas)
+        log_df =log_df[log_df.has_remote_interval]
+        colname = 'remote_interval'
+
+    # load theta
+    key = {"nwb_file_name": nwb_copy_file_name,
+        "epoch": str(session_name[:2]),
+        "data_type":data_type}
+    theta_pd = pd.read_csv((MUATheta() & key).fetch1("theta_xr"))
+
+    for trialID in log_df.index:
+        remote_intervals = log_df.loc[trialID,colname]
+        for remote_interval in remote_intervals:
+            phase0 = time_to_phase(theta_pd, remote_interval[0])
+            phase_start_all.append(phase0)
+
+            phase1 = time_to_phase(theta_pd, remote_interval[-1])
+            phase_end_all.append(phase1)
+            
+    return phase_start_all, phase_end_all
+
     

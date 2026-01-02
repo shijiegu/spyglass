@@ -67,7 +67,12 @@ def save_remote_animal(animal, list_of_days, encoding_set, classifier_param_name
     return 1
 
 def load_remote_animal(animal, list_of_days, encoding_set, classifier_param_name,
-                                proportion = 0.1, use_1d = 1):
+                                proportion = 0.1, use_1d = 1, spyglass = False):
+    if spyglass:
+        print("Loading from spyglass database instead of pickle file.")
+        loaded_data = load_remote_animal_spyglass(animal, list_of_days, encoding_set, classifier_param_name,
+                                proportion = proportion, use_1d = use_1d)
+        return loaded_data
     d1, d2 = list_of_days[0], list_of_days[-1]
     save_name = return_save_name_remote_parser(animal, encoding_set, classifier_param_name, d1, d2, proportion, use_1d)
     file_path = output_folder + save_name + '.pkl'
@@ -76,6 +81,43 @@ def load_remote_animal(animal, list_of_days, encoding_set, classifier_param_name
         loaded_data = pickle.load(file)
         print(f"Successfully loaded data from '{file_path}':")
     return loaded_data
+
+def load_remote_animal_spyglass(animal, list_of_days, encoding_set, classifier_param_name,
+                                proportion = 0.1, use_1d = 1):
+    """load from spyglass database instead of pickle file."""
+    day_session_animal = []
+    time_intervals_animal = []
+    arm_identities_animal = []
+
+    for day in list_of_days:
+        nwb_file_name = animal.lower() + day + '.nwb'
+        nwb_copy_file_name = get_nwb_copy_filename(nwb_file_name)
+        session_names, position_names = runSessionNames(nwb_copy_file_name)
+        for session_name in session_names:
+            epoch_num = int(session_name[:2])
+            print(nwb_copy_file_name, session_name)
+            q = {"nwb_file_name": nwb_copy_file_name,
+                "epoch": epoch_num,
+                "proportion":proportion,
+                "delta_t_minus":5, "delta_t_plus":5,
+                "max_flag": 1}
+            df = ChangeofMindRemoteTheta().fetch1_dataframe(q)
+            trials = df[df.has_remote_interval].index
+            for trial in trials:
+                remote_interval = df.loc[trial,'remote_interval']
+                remote_content = df.loc[trial,'remote_content']
+                
+                day_session_animal.append([nwb_copy_file_name, session_name, [trial for i in range(len(remote_interval))]])
+                time_intervals_animal.append(remote_interval)
+                arm_identities_animal.append(remote_content)
+
+    return {
+        "info_animal": day_session_animal,
+        "time_intervals_animal": time_intervals_animal,
+        "arm_identities_animal": arm_identities_animal
+    }
+            
+                
 
 def find_remote_theta_animal(animal,list_of_days,classifier_param_name,encoding_set,
                              control = False,
@@ -408,6 +450,8 @@ def dotproduct(head_direction, arm):
 ### code in figure4d calls the following functions
 
 def find_angle(max_posterior_2d,head_orientation,animal_location):
+    # in radian
+    
     # make unit vector
     head_orientation_unit = np.hstack((np.cos(head_orientation).reshape((-1,1)),np.sin(head_orientation).reshape((-1,1)))) #unit vector
     displacement_unit = max_posterior_2d - animal_location
@@ -415,9 +459,9 @@ def find_angle(max_posterior_2d,head_orientation,animal_location):
     
     # finally: return degree
     dot_product = [np.dot(head_orientation_unit[i],displacement_unit[i].T) for i in range(displacement_unit.shape[0])]
-    angle = np.degrees(np.arccos(np.clip(dot_product, -1.0, 1.0)))
+    angle = np.arccos(np.clip(dot_product, -1.0, 1.0))
     
-    return angle
+    return angle, head_orientation_unit, displacement_unit
 
 linear_map,welllocations = get_linearization_map()
 linear_map_arms = linear_map[[0,3,5,7,9]]

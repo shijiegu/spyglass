@@ -45,6 +45,7 @@ nodes[9] = (node_positions[8],node_positions[9]) #arm4
 
 linear_map,welllocations = get_linearization_map(track_graph_name='4 arm lumped 2023')
 region={}
+region[5] = linear_map[0]
 region[6] = linear_map[3]
 region[7] = linear_map[5]
 region[8] = linear_map[7]
@@ -698,7 +699,7 @@ def find_triggered_log_session(nwb_copy_file_name,session_name,position_name,
             continue
         return_tuple.append((t, int(initial_choice), log_df.loc[t1:t2]))
     
-    # randomly choose trials before or after
+    # randomly choose trials before
     return_tuple_rand = []
     for t_ind in range(len(return_tuple)):
         t0 = return_tuple[t_ind][0]
@@ -710,13 +711,13 @@ def find_triggered_log_session(nwb_copy_file_name,session_name,position_name,
         else:
             print(f"Cannot find nearby random trial for {nwb_copy_file_name}, {session_name}, trial {t0}.")
             # if cannot find, bug.
-            assert 1 == 0
+            return_tuple_rand.append((np.nan, np.nan, np.nan))
             
     return return_tuple, return_tuple_rand
 
 def return_a_nearby_random_trial(t0, change_of_mind_trials, min_trial = 1, max_trial = 80, subset_trials = None):
     # subset_trials: if provided, only select from these trials.
-    candidate_trials = [t0-1, t0+1, t0-2, t0+2, t0-3, t0+3]
+    candidate_trials = [t0-1]
     t0_rand = np.nan
     
     condition3 = True
@@ -762,6 +763,8 @@ def parse_to_correct(log_tuple_t, seq_map, rand = False):
     rand: under rand = True, log_tuple_t should be a tuple of randomly selected behavior log snippet.
     """
     (t,j_wouldhave,log_df) = log_tuple_t
+    if np.isnan(t):
+        return np.nan, np.nan
     rewardNum = log_df.loc[t,'rewardNum']
     if rewardNum>=1:
         correct = rewardNum == 2

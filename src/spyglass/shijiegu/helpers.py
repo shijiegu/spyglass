@@ -1,6 +1,5 @@
 import numpy as np
 import pandas as pd
-from spyglass.common.common_interval import _intersection
 
 def interpolate_to_new_time(df, new_time, upsampling_interpolation_method='linear'):
     old_time = df.index
@@ -122,3 +121,20 @@ def find_trial_id(c_end,log_df):
         if (c_end-log_df.loc[trial_id_min].timestamp_H)<=5: #less than 5 seconds from outer poke:
             trial_id=trial_id_min
             return trial_id
+        
+
+def _intersection(interval1, interval2):
+    """Takes the (set-theoretic) intersection of two intervals"""
+    start = max(interval1[0], interval2[0])
+    end = min(interval1[1], interval2[1])
+    intersection = np.array([start, end]) if end > start else None
+    return intersection
+
+
+def _union(interval1, interval2):
+    """Takes the (set-theoretic) union of two intervals"""
+    if _intersection(interval1, interval2) is None:
+        return np.array([interval1, interval2])
+    return np.array(
+        [min(interval1[0], interval2[0]), max(interval1[1], interval2[1])]
+    )

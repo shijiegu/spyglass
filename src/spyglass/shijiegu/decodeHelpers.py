@@ -8,7 +8,6 @@ import os
 from spyglass.common import (Session, IntervalList,IntervalPositionInfo,
                              LabMember, LabTeam, Raw, Session, Nwbfile,
                             Electrode,LFPBand,interval_list_intersect)
-from spyglass.common.common_interval import _intersection
 from spyglass.common.common_position import IntervalLinearizedPosition
 
 import spyglass.spikesorting.v0 as ss
