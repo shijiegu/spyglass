@@ -1,6 +1,21 @@
 import numpy as np
 import pandas as pd
 
+def unique_stable(arr):
+    # Get unique values and their corresponding indices in the original array
+    # 'return_index=True' is the key here
+    unique_values, indices = np.unique(arr, return_index=True)
+
+    # The 'indices' array is sorted by default (1, 2, 0, 5, 7) if values were sorted (1, 2, 3, 4, 5)
+    # to maintain original order, sort the indices
+    sorted_indices = np.sort(indices)
+
+    # Use the sorted indices to select elements from the original array
+    # This reconstructs the array with only unique elements in their first-occurrence order
+    unique_ordered_data = arr[sorted_indices]
+    
+    return unique_ordered_data
+
 def interpolate_to_new_time(df, new_time, upsampling_interpolation_method='linear'):
     old_time = df.index
     new_index = pd.Index(np.unique(np.concatenate(
@@ -138,3 +153,39 @@ def _union(interval1, interval2):
     return np.array(
         [min(interval1[0], interval2[0]), max(interval1[1], interval2[1])]
     )
+    
+def intersection_of_lists(arr1, arr2):
+    ### intersections of list of 2-element list
+    arr1 = np.array(arr1)
+    arr2 = np.array(arr2)
+    
+    # 1. View arrays as a structured data type (e.g., 'i,i' for two integers)
+    # This lets NumPy treat each row as a single comparable item
+    dtype = [('f1', int), ('f2', int)]
+    arr1_structured = arr1.view(dtype)
+    arr2_structured = arr2.view(dtype)
+
+    # 2. Find which elements in arr1 are also in arr2 using numpy.isin
+    # This returns a boolean mask
+    mask = np.isin(arr1_structured, arr2_structured)
+
+    # 3. Get the indices from the mask using numpy.nonzero
+    # The indices correspond to the rows in the original arr1 that are in the intersection
+    arr1_indices = np.nonzero(mask)[0]
+
+    # 4. To get the corresponding indices in arr2, you can create a temporary map
+    # or use a loop for a more direct index retrieval in arr2
+    arr2_indices = []
+    for item in arr1[arr1_indices]:
+        # Use np.where to find the index of the matching row in arr2
+        # The condition below finds where the row in arr2 matches the current item from arr1
+        # We use (arr2 == item).all(axis=1) to check if all elements in the row match
+        match_indices = np.where((arr2 == item).all(axis=1))[0]
+        if match_indices.size > 0:
+            arr2_indices.append(match_indices[0]) # Append the first matching index
+
+
+    return arr1[arr1_indices], arr1_indices.tolist(), arr2_indices
+
+def select_list_elements(list1, inds):
+    return [list1[ind] for ind in inds]

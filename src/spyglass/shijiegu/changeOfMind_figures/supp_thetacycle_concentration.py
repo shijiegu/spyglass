@@ -30,35 +30,39 @@ from spyglass.shijiegu.ripple_add_replay import select_subset_helper_pd, select_
 from spyglass.shijiegu.changeOfMind_helper import nodes
 from spyglass.shijiegu.ripple_add_replay import position_posterior2arm_posterior
 from spyglass.shijiegu.changeOfMind_triggered import linear_map
+from spyglass.shijiegu.changeOfMind_triggered_position import load_triggered_position_decode_session_spyglass
+from spyglass.shijiegu.changeOfMind_figures.figure4d import load_theta_df
 
-def return_concentration_session(nwb_copy_file_name, session_name, data_type = "mua", posterior_thresholds = [0.15, 0.2, 0.3]):
+def return_concentration_session(nwb_copy_file_name, session_name,
+                                 data_type = "mua",
+                                 posterior_thresholds = [0.15, 0.2, 0.3],
+                                 spyglass = False,
+                                 ):
     """
     data_type: "mua" or "corpus_callosum" or "sorted_pyramidal"
     """
+    animal = nwb_copy_file_name[:5]
+    session_names, _ = runSessionNames(nwb_copy_file_name)
     
-    # find remote intervals
-    pandas = (ChangeofMindRemoteTheta() & {"nwb_file_name":nwb_copy_file_name,
-                                           "proportion":0.1,
-                                            "delta_t_minus":5,
-                                            "delta_t_plus":5,
-                                        "epoch":str(session_name[:2])}).fetch1("pandas")
-    log_df = pd.DataFrame(pandas)
-    log_df =log_df[log_df.has_remote_interval]
-    colname = 'remote_interval'
+    encoding_set = '2Dheadspeed_above_4'
+    classifier_param_name = 'default_decoding_gpu_4armMaze'
+    parameter_name = "params_both_max_run_time_2_state"
     
+    print(f"Processing {nwb_copy_file_name} session: {session_name}")
+        
+    epoch_num = int(session_name[:2])
+    # load triggered position info for this session
+    loaded_data = load_triggered_position_decode_session_spyglass(
+        nwb_copy_file_name, epoch_num, parameter_name, proportion = 0.1,
+                                                    )
+    if len(loaded_data) == 0:
+        return {threshold: [] for threshold in posterior_thresholds}, []
+            
     # load theta
     key = {"nwb_file_name": nwb_copy_file_name,
         "epoch": str(session_name[:2]),
         "data_type":data_type}
-    theta_pd = pd.read_csv((MUATheta() & key).fetch1("theta_xr"))
-    
-    animal = nwb_copy_file_name[:5]
-    if animal == "eliot":
-        encoding_set = '2Dheadspeed_above_4_andlowmua'
-        classifier_param_name = 'default_decoding_gpu_4armMaze'
-    else:
-        encoding_set = '2Dheadspeed_above_4'
-        classifier_param_name = 'default_decoding_gpu_4armMaze'
+    theta_pd = load_theta_df(key, spyglass = spyglass)
     
     # load decode
     decode_path = (DecodeResultsLinear & {"nwb_file_name":nwb_copy_file_name,
@@ -76,30 +80,29 @@ def return_concentration_session(nwb_copy_file_name, session_name, data_type = "
     
     concentration_dict_all_trials = {threshold: [] for threshold in posterior_thresholds}
     theta_cycle_num_all = []
-    for trialID in log_df.index:
-        remote_intervals = log_df.loc[trialID,colname]
-        for remote_interval in remote_intervals:
-            # select theta in this interval
-            remote_interval_extended = remote_interval.copy()
-            remote_interval_extended[0] -= 0.02  # extend a bit
-            remote_interval_extended[1] += 0.02 # extend a bit
-            theta_subset = theta_pd[(theta_pd.time >= remote_interval_extended[0]) & (theta_pd.time <= remote_interval_extended[-1])]
-            if len(theta_subset) == 0:
-                continue
+    
+    triggered_positions = loaded_data["triggered_positions_baseoff"]
+        
+    for triggered_position in triggered_positions:
+        # select theta in this interval
+        remote_interval_extended = [triggered_position.index[0], triggered_position.index[-1]]
+        theta_subset = theta_pd[(theta_pd.time >= remote_interval_extended[0]) & (theta_pd.time <= remote_interval_extended[-1])]
+        if len(theta_subset) == 0:
+            continue
                 
-            concentration_dict, theta_cycle_num = return_concentration_event(
-                remote_interval_extended, pos1d, pos2d, decode, theta_subset, thresholds_nonlocal = posterior_thresholds)
-            theta_cycle_num_all.append(theta_cycle_num)
+        concentration_dict, theta_cycle_num = return_concentration_event(
+            remote_interval_extended, pos1d, pos2d, decode, theta_subset, thresholds_nonlocal = posterior_thresholds)
+        theta_cycle_num_all.append(theta_cycle_num)
             
             
-            for threshold in posterior_thresholds:
-                if concentration_dict is not None:
-                    concentration_dict_all_trials[threshold].extend(concentration_dict[threshold])  
+        for threshold in posterior_thresholds:
+            if concentration_dict is not None:
+                concentration_dict_all_trials[threshold].extend(concentration_dict[threshold])  
             
     return concentration_dict_all_trials, theta_cycle_num_all
 
 
-def return_concentration_day(animal, days):
+def return_concentration_day(animal, days, spyglass = False):
     concentration_dict_all_trials = {0.15: [], 0.2: [], 0.3: []}
     theta_cycle_num_all_trials = []
     
@@ -120,7 +123,8 @@ def return_concentration_day(animal, days):
         for session_name in session_names:
             print(f"Processing {animal} {d} session: {session_name} per theta cycle")
             concentration_dict_all_trials_session, theta_cycle_num_all_session = return_concentration_session(
-                nwb_copy_file_name, session_name, data_type = "mua", posterior_thresholds = [0.15, 0.2, 0.3])
+                nwb_copy_file_name, session_name,
+                data_type = "mua", posterior_thresholds = [0.15, 0.2, 0.3], spyglass = spyglass)
             for threshold in concentration_dict_all_trials_session.keys():
                 concentration_dict_all_trials[threshold].extend(concentration_dict_all_trials_session[threshold])
             theta_cycle_num_all_trials.extend(theta_cycle_num_all_session)
@@ -144,7 +148,7 @@ def return_concentration_event(t0t1, pos1d, pos2d, decode, theta, thresholds_non
     pos2d_subset = pos2d_subset[ind]
     
     if len(pos1d_subset) == 0:
-        return None
+        return None, None
     
     # get decode
     decode_subset = decode.isel(time = pos2d_subset.index)

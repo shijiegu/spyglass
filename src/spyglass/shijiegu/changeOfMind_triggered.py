@@ -120,9 +120,13 @@ def turnaround_triggered_position(t,linear_position_info,
     arm_base = region[int(subset_arm)][0]
 
     # select subset
-    (t0,t1) = (t - delta_t_minus, t + delta_t_plus)
-    t0 = np.max([t0, tmin])
-    t1 = np.min([t1, tmax])
+    if np.isnan(delta_t_plus):
+        t0 = np.max([t - delta_t_minus, tmin])
+        t1 = tmax
+    else:   
+        (t0,t1) = (t - delta_t_minus, t + delta_t_plus)
+        t0 = np.max([t0, tmin])
+        t1 = np.min([t1, tmax])
     subset_ind = ((linear_position_info.index >= t0) & (linear_position_info.index <= t1))
     subset_linear = linear_position_info.loc[subset_ind]
     
@@ -138,13 +142,14 @@ def turnaround_triggered_position(t,linear_position_info,
             return None, None, None
 
         # pick the interval rat is in
-        interval_flag = np.argwhere([True if interval[0]<=t and interval[1]>=t else False for interval in intervals]).ravel()
+        interval_flag = np.argwhere([True if interval[0]-0.1<=t and (interval[1]+0.1)>=t else False for interval in intervals]).ravel()
+
         if len(interval_flag) == 0:
             return None, None, None
         interval = intervals[int(interval_flag)]
         subset_ind = ((subset_linear.index >= interval[0]) & (subset_linear.index <= interval[1]))
         subset_linear = subset_linear.loc[subset_ind]
-
+        
         peak_index = np.nanargmin(np.abs(subset_linear.index - t)) #np.nanargmin(subset_linear.index - t)
         y0 = subset_linear.iloc[peak_index].linear_position
 
@@ -456,6 +461,8 @@ def return_change_of_mind_times_from_log(log_df, linear_position_info, nearby = 
     if home_ripple and nearby:
         # if we are looking at home ripples, we want to look at the home well after the trials.
         subset_trials = subset_trials + 1
+        
+    turnaround_times = [sorted(tt) for tt in turnaround_times]
 
     
     if nearby:
@@ -477,6 +484,8 @@ def return_change_of_mind_times_from_log(log_df, linear_position_info, nearby = 
         
         print("nearby rowID", rowID_)
         print("nearby turnaround_times", turnaround_times_)
+        turnaround_times_ = [sorted(tt) for tt in turnaround_times_]
+        
         return rowID_, turnaround_times_
     else:
         return rowID, turnaround_times
@@ -488,6 +497,7 @@ def find_triggered_session(
         delta_t_minus,delta_t_plus,
         max_flag,segment_only,nearby,
         proportion = 0.1,
+        decode_options= None,
         multiple_CoM = False, single_CoM = False, first_CoM = True, last_CoM = False):
     # if multiple_CoM is True, only plot trials with multiple change of mind.
     # This function returns "triggered decode", the function name is named poorly.
@@ -497,16 +507,22 @@ def find_triggered_session(
     print(session_name)
     print(position_name)
     animal = nwb_copy_file_name[:5]
-
-    linear_position_info=(IntervalLinearizedPosition() & {
+    
+    q = IntervalLinearizedPosition() & {
         'nwb_file_name':nwb_copy_file_name,
         'interval_list_name':position_name,
-        'position_info_param_name':'default_decoding'}).fetch1_dataframe()
+        'position_info_param_name':'default_decoding',
+        'track_graph_name': '4 arm lumped 2023'}
+    if len(q) == 0:
+        print(f"No linearized position info for {nwb_copy_file_name}, session {session_name}.")
+        return [], [], [], [], [], []
 
-    #position_info = (IntervalPositionInfo() & {
-    #    'nwb_file_name':nwb_copy_file_name,
-    #    'interval_list_name':position_name,
-    #    'position_info_param_name':'default_decoding'}).fetch1_dataframe()
+    linear_position_info=q.fetch1_dataframe()
+
+    # position_info = (IntervalPositionInfo() & {
+    #     'nwb_file_name':nwb_copy_file_name,
+    #     'interval_list_name':position_name,
+    #     'position_info_param_name':'default_decoding'}).fetch1_dataframe()
     
     # 2. load stateScript
     #key={'nwb_file_name':nwb_copy_file_name,'epoch':int(session_name[:2])}
@@ -519,7 +535,7 @@ def find_triggered_session(
     q = {"nwb_file_name": nwb_copy_file_name,
         "epoch":int(session_name[:2]),
         "proportion":str(proportion)}
-    if len(ChangeofMind() & q) == 0:
+    if len(ChangeofMind() & q) == 0 and not nearby:
         print(f"No change of mind on session {nwb_copy_file_name}, epoch {session_name}.")
         return [], [], [], [], [], []
     
@@ -530,13 +546,8 @@ def find_triggered_session(
                                                                    first_CoM, last_CoM)
     
     # 3. load data
-    decode_options = {}
-    if animal.lower() == "eliot":
-        decode_options["encoding_set"] = '2Dheadspeed_above_4_andlowmua'
-        decode_options["classifier_param_name"] = 'default_decoding_gpu_4armMaze'
-        decode_options["decode_threshold_method"] = 'MUA_0SD'
-        decode_options["causal"] = True
-    else:
+    if decode_options is None:
+        decode_options = {}
         decode_options["encoding_set"] = '2Dheadspeed_above_4'
         decode_options["classifier_param_name"] = 'default_decoding_gpu_4armMaze'
         decode_options["decode_threshold_method"] = 'MUA_M05SD'
@@ -549,14 +560,21 @@ def find_triggered_session(
     triggered_positions = []
     triggered_positions_baseoff = [] #absolute time
     day_session_trial = []
+    
 
     for trial_ind in range(len(rowID)):
         trial = rowID[trial_ind]
         ts = turnaround_times[trial_ind]
         tmin = log_df.loc[trial,'timestamp_H']
+        
         if np.isnan(tmin):
-            tmin = log_df.loc[trial,'timestamp_O'] - 2
-        tmax = log_df.loc[trial,'timestamp_O'] + 2
+            tmin = log_df.loc[trial,'timestamp_O'] - delta_t_minus
+            
+        if nearby:
+            tmax_max = log_df.loc[trial,'timestamp_O'] + delta_t_plus
+        else:
+            tmax_max = log_df.loc[trial,'timestamp_O']
+
         
         # problemetic session/trials
         if (nwb_copy_file_name == "lewis20240113_.nwb" and 
@@ -572,12 +590,21 @@ def find_triggered_session(
             animal_location = None
         
         triggered_position_baseoff = None
+        
         for t_ind in range(len(ts)):
+            
             t = ts[t_ind]
             if t_ind < len(ts) - 1:
-                tmax = np.min([tmax, ts[t_ind + 1]])
+                tmax = np.min([tmax_max, ts[t_ind + 1]])
+            else:
+                if nearby:
+                    tmax = tmax_max + delta_t_plus + 0.05
+                else:
+                    tmax = tmax_max
+                
             if triggered_position_baseoff is not None and len(triggered_position_baseoff) > 0:
                 tmin = np.max([tmin, triggered_position_baseoff.index[-1]])
+            
             triggered_position, triggered_position_baseoff, arm = turnaround_triggered_position(t,linear_position_info,
                                                                                        delta_t_minus,delta_t_plus,
                                                                                        segment_only,
@@ -588,6 +615,7 @@ def find_triggered_session(
             triggered_positions.append(triggered_position)
             triggered_positions_baseoff.append(triggered_position_baseoff)
             day_session_trial.append((nwb_copy_file_name,session_name,trial,arm))
+            
         
     # 5. triggered decode traces
     triggered_decodes = []
@@ -608,8 +636,13 @@ def find_triggered_session(
         triggered_decodes.append(triggered_decode)
         triggered_decodes_baseoff.append(triggered_decode_baseoff)
         triggered_decodes_abs.append(triggered_decode_abs)
+    
+    day_session_trial_df = []
+    for entry in day_session_trial:
+        day_session_trial_tmp = (int(entry[2]), int(entry[3]))
+        day_session_trial_df.append(day_session_trial_tmp)
         
-    return triggered_positions, triggered_positions_baseoff, triggered_decodes, triggered_decodes_baseoff, triggered_decodes_abs, day_session_trial
+    return triggered_positions, triggered_positions_baseoff, triggered_decodes, triggered_decodes_baseoff, triggered_decodes_abs, day_session_trial_df
 
 def select_subset_helper_position(xr_ob,region):
     ind = np.logical_and(xr_ob.position>=region[0],xr_ob.position<=region[1])
@@ -673,6 +706,8 @@ def find_triggered_log_session(nwb_copy_file_name,session_name,position_name,
         "nwb_file_name": nwb_copy_file_name,
         "epoch":int(session_name[:2]),
         "proportion":str(proportion)}
+    if len(ChangeofMind & q) == 0:
+        return [], []
     log_df = ChangeofMind().fetch1_dataframe(q)
     rowID = np.array(log_df[log_df.change_of_mind].index)
         
@@ -704,7 +739,7 @@ def find_triggered_log_session(nwb_copy_file_name,session_name,position_name,
     for t_ind in range(len(return_tuple)):
         t0 = return_tuple[t_ind][0]
         t0_rand = return_a_nearby_random_trial(
-            t0, rowID, min_trial = 1, max_trial = len(log_df) - 1)
+            t0, rowID, min_trial = 1, max_trial = len(log_df) - 2)
         if not np.isnan(t0_rand):
             return_tuple_rand.append((t0_rand, np.nan, log_df.loc[(t0_rand-back_trial
                                                                    ):(t0_rand+after_trial)]))
@@ -717,10 +752,11 @@ def find_triggered_log_session(nwb_copy_file_name,session_name,position_name,
 
 def return_a_nearby_random_trial(t0, change_of_mind_trials, min_trial = 1, max_trial = 80, subset_trials = None):
     # subset_trials: if provided, only select from these trials.
-    candidate_trials = [t0-1]
+    candidate_trials = [t0-1, t0-2, t0+1, t0+2, t0-3, t0-3, t0+3, t0+3]
     t0_rand = np.nan
     
     condition3 = True
+    random.seed(t0 + 10 * len(change_of_mind_trials))
     for t in random.sample(candidate_trials, len(candidate_trials)):
             
         condition1 = ~np.isin(t, change_of_mind_trials)
@@ -951,7 +987,22 @@ from sklearn.gaussian_process.kernels import RBF
 from sklearn.metrics.pairwise import laplacian_kernel
 from sklearn.gaussian_process.kernels import PairwiseKernel
 
-def form_null_model(triggered_positions, triggered_decodes):
+def form_null_model_full(triggered_positions, triggered_decodes):
+    # calls form_null_model()
+    
+    # GP for the mean
+    gaussian_process_mean, X_train, Y_train, quantile_995, noise_var = form_null_model(
+        triggered_positions, triggered_decodes, return_var = True)
+    
+    # GP for the difference
+    diff = [np.abs(np.array(triggered_positions[ind])-np.array(triggered_decodes[ind])
+                                ) for ind in range(len(triggered_positions))]
+    gaussian_process_diff, _1, _2, _3 = form_null_model(
+        triggered_positions, diff, noise_var = noise_var)
+        
+    return gaussian_process_mean, X_train, Y_train, gaussian_process_diff
+
+def form_null_model(triggered_positions, triggered_decodes, noise_var = None, quantile = 0.995, return_var = False, length_scale = 5):
     position_ = []
     decodes_ = []
     for rendition_ind in range(len(triggered_positions)):
@@ -979,19 +1030,26 @@ def form_null_model(triggered_positions, triggered_decodes):
 
     # fit GP
     # covariance prior
-    kernel = 10 * RBF(length_scale=20)
+    kernel = RBF(length_scale=length_scale) #10 * RBF(length_scale=20)
     #kernel = PairwiseKernel(metric='linear',gamma = 20)
-    noise_std = 10 * 10 # units cm
+    if noise_var is None:
+        distance = np.concatenate(
+            [np.abs(np.array(triggered_positions[ind]) - np.array(triggered_decodes[ind])) for ind in range(len(triggered_positions))]
+            )
+        quantile_995 = np.nanquantile(distance, quantile)
+        noise_var = np.nanvar(distance)
     
     gaussian_process = GaussianProcessRegressor(
-        kernel=kernel, alpha=noise_std**2, n_restarts_optimizer=9
+        kernel=kernel, alpha=noise_var, n_restarts_optimizer=9
     ) #Due to multiple local optima, the optimizer can be started repeatedly by specifying n_restarts_optimizer
     gaussian_process.fit(X_train, Y_train)
 
-    return gaussian_process, X_train, Y_train
+    if return_var:
+        return gaussian_process, X_train, Y_train, quantile_995, noise_var
+    return gaussian_process, X_train, Y_train, None
 
-def classify_trial(pos_query, decode_real, gaussian_process, positive_only = False, minimum_duration = 0.04,
-                   return_interval = False):
+def classify_trial(pos_query, decode_real, gaussian_process, gaussian_processCI, positive_only = False, minimum_duration = 0.04,
+                   return_interval = False, debug = False, sd = 4):
     # given a gaussian process null model between position and decode
     #       and real position and decode data 
     # First, we query all decode null model. 
@@ -999,16 +1057,24 @@ def classify_trial(pos_query, decode_real, gaussian_process, positive_only = Fal
     
     if np.all(np.isnan(decode_real)):
         # in the case of decoding quality control having decided this is not a valid decode, we do not further process
-        return False, np.nan, []
+        return False, [np.nan], []
     
-    decode_mean_null, decode_std_null = gaussian_process.predict(np.array(pos_query).reshape((-1,1)), return_std=True)
+    nan_ind = np.isnan(np.array(pos_query)).ravel()
+    decode_mean_null_notnan = gaussian_process.predict(np.array(pos_query)[~nan_ind].reshape((-1,1)), return_std=False)
+    decode_mean_null = np.zeros(len(pos_query)) + np.nan
+    decode_mean_null[~nan_ind] = decode_mean_null_notnan
     
-    decode_null_u = pd.Series(decode_mean_null + 3 * decode_std_null, index = decode_real.index)
-    decode_null_l = pd.Series(decode_mean_null - 3 * decode_std_null, index = decode_real.index)
+    decode_CI_null_notnan = gaussian_processCI.predict(np.array(pos_query)[~nan_ind].reshape((-1,1)), return_std=False)
+    decode_CI_null = np.zeros(len(pos_query)) + np.nan
+    decode_CI_null[~nan_ind] = decode_CI_null_notnan
+    
+    decode_null_u = pd.Series(decode_mean_null + sd * decode_CI_null, index = decode_real.index)
+    decode_null_l = pd.Series(decode_mean_null - sd * decode_CI_null, index = decode_real.index)
     if positive_only: # find discrepancy ahead of the animal
-        diff = (decode_real - decode_null_u) >= 0
+        diff = (np.array(decode_real).ravel() - np.array(decode_null_u)) >= 0
     else: # discrepancy behind and ahead of the animal
-        diff = np.logical_or((decode_real - decode_null_u) >= 0, (decode_real - decode_null_l) <= 0)
+        diff = np.logical_or((np.array(decode_real).ravel() - np.array(decode_null_u)) >= 0,
+                             (np.array(decode_real).ravel() - np.array(decode_null_l)) <= 0)
     
     diff = pd.Series(diff, index = decode_real.index)
     intervals = segment_boolean_series(diff, minimum_duration=minimum_duration)
@@ -1017,32 +1083,31 @@ def classify_trial(pos_query, decode_real, gaussian_process, positive_only = Fal
     #delta_t = np.mean(np.diff(decode_real.index))
     #if np.sum(diff) * delta_t >= 0.04:
     
-    discrepancy = np.array(decode_real - pos_query)
+    discrepancy = (np.array(decode_real) - np.array(pos_query)).ravel()
     dev_max_ind = np.nanargmax(np.abs(discrepancy))
     dev_max = discrepancy[dev_max_ind]
     if len(intervals) > 0:
-        """
+
         # calculate largest metric
         deviation = []
         for intvl in intervals:
-            decode_real_intvl = decode_real[
-                np.logical_and(decode_real.index >= intvl[0],decode_real.index <= intvl[1])]
-            pos_query_intvl = pos_query[
-                np.logical_and(pos_query.index >= intvl[0],pos_query.index <= intvl[1])]
-            dev = np.nanmax(np.abs(np.array(decode_real_intvl - pos_query_intvl)))
+            range_ind = np.logical_and(decode_real.index >= intvl[0],decode_real.index <= intvl[1])
+            decode_real_intvl = decode_real[range_ind]
+            pos_query_intvl = pos_query[range_ind]
+            dev = np.nanmax(np.abs(
+                np.array(decode_real_intvl) - np.array(pos_query_intvl)
+                ))
             
             deviation.append(dev)
-        dev_max = np.max(np.array(deviation))
-        """
         
         if return_interval:
-            return True, dev_max, intervals
+            return True, deviation, intervals
         else:
-            return True, dev_max, []
-    
+            return True, deviation, []
+
     if return_interval:
-        return False, dev_max, []
-    return False, dev_max, []
+        return False, [dev_max], []
+    return False, [dev_max], []
 
 def find_large_position_minus_decode_trials_lightweight(gaussian_process, positions, decodes, minimum_duration = 0.04):
     """
@@ -1058,7 +1123,8 @@ def find_large_position_minus_decode_trials_lightweight(gaussian_process, positi
         decode = decodes[ind]
         if len(position) != len(decode):
             continue
-        flag, _, intervals = classify_trial(position, decode, gaussian_process, minimum_duration = minimum_duration, return_interval = True)
+        flag, _, intervals = classify_trial(position, decode, gaussian_process,
+                                            minimum_duration = minimum_duration, return_interval = True, sd = sd)
         if flag:
             flag_all = True
         for interval in intervals:
@@ -1068,12 +1134,10 @@ def find_large_position_minus_decode_trials_lightweight(gaussian_process, positi
 
 def find_large_position_minus_decode_trials(trial_info, 
                                             positions_baseoff, decodes_baseoff,
-                                            positions_nearby, decodes_nearby, return_interval = False,
-                                            minimum_duration = 0.04):
+                                            gaussian_process,gaussian_processCI,
+                                            return_interval = False,
+                                            minimum_duration = 0.04, debug = False, sd= 4):
     """return trial info and indices of the trigered parsing for these huge discrepancy dates"""
-
-    # form a null model between deocde and position
-    gaussian_process, _ , _2 = form_null_model(positions_nearby, decodes_nearby)
     
     # compare real data to null
     trials = []   # with long theta
@@ -1084,15 +1148,19 @@ def find_large_position_minus_decode_trials(trial_info,
     trials_non = [] #without long theta
     inds_non = []
     dev_maxs_non = []
-    
+    dev_intervals_non = []
+
     
     for rendition_ind in range(len(positions_baseoff)):
         position = positions_baseoff[rendition_ind]
         decode = decodes_baseoff[rendition_ind]
         if len(position) != len(decode):
             continue
-        flag, dev_max, intervals = classify_trial(position, decode, gaussian_process,  minimum_duration = minimum_duration,
-                                                  return_interval = return_interval)
+        flag, dev_max, intervals = classify_trial(position, decode, gaussian_process,  gaussian_processCI,
+                                                  minimum_duration = minimum_duration,
+                                                  return_interval = return_interval,
+                                                  debug = False, sd = sd)
+        
         if flag:
             inds.append(rendition_ind)
             trials.append(trial_info[rendition_ind])
@@ -1103,9 +1171,11 @@ def find_large_position_minus_decode_trials(trial_info,
             inds_non.append(rendition_ind)
             trials_non.append(trial_info[rendition_ind])
             dev_maxs_non.append(dev_max)
+            if return_interval:
+                dev_intervals_non.append(intervals)
 
     if return_interval:
-        return trials, inds, dev_maxs, dev_intervals, trials_non, inds_non, dev_maxs_non
+        return trials, inds, dev_maxs, dev_intervals, trials_non, inds_non, dev_maxs_non, dev_intervals_non
     return trials, inds, dev_maxs, trials_non, inds_non, dev_maxs_non
 
 import matplotlib.cm as cm
@@ -1113,7 +1183,7 @@ cmap = cm.cool
 from matplotlib.colors import Normalize
    
 def plot_physical_vs_mental_position(animal,positions_abs,
-                                     decodes_abs):
+                                     decodes_abs, color_method = 'cool',save_name = None, ax = None):
     """the function signature is misleading, 
     the <position_abs> should expect base subtracted triggered_position.
     the <decodes_abs> should expect base subtracted triggered_decodes."""
@@ -1122,25 +1192,35 @@ def plot_physical_vs_mental_position(animal,positions_abs,
     ind_by_length = np.argsort(length)
     norm = Normalize(vmin=0, vmax=len(ind_by_length) - 1)
     
-    plt.figure(figsize=(5,5))
-    ax1 = plt.gca()
+    if ax is None:
+        plt.figure(figsize=(5,5))
+        ax1 = plt.gca()
+    else:
+        ax1 = ax
     
     row_ind = 0
     for rendition_ind in ind_by_length:
         position_abs = positions_abs[rendition_ind]
         decode_abs = decodes_abs[rendition_ind]
         if len(position_abs) == len(decode_abs):
-            ax1.scatter(np.array(decode_abs), np.array(position_abs), s = 3, alpha = 0.5, color = cmap(norm(row_ind)))
+            if color_method == "cool":
+                ax1.scatter(np.array(decode_abs), np.array(position_abs), s = 3, alpha = 0.5, color = cmap(norm(row_ind)),rasterized=True)
+            elif color_method == "random":
+                ax1.scatter(np.array(decode_abs), np.array(position_abs), s = 3, alpha = 0.5, color = f'C{rendition_ind}',rasterized=True)
+            else:
+                ax1.scatter(np.array(decode_abs), np.array(position_abs), s = 3, alpha = 0.5, color = "grey",rasterized=True)
             row_ind = row_ind + 1
         else:
             print(rendition_ind)
-    ax1.plot([0,ax1.get_ylim()[1]],[0,ax1.get_ylim()[1]],linestyle=":",color = "k",alpha = 0.5)
     
-    ax1.axvline(86-18,linestyle=":",color = "k",alpha = 0.5)
-    ax1.set_xlim([-1, 87])
-    #ax1.set_ylim([-1, 87])
+    
+    ax1.axvline(96-18,linestyle=":",color = "k",alpha = 0.5)
+    ax1.set_xlim([-1, 90])
+    ax1.set_ylim([-1, 90])
+    
+    ax1.plot([0,ax1.get_ylim()[1]],[0,ax1.get_ylim()[1]],linestyle=":",color = "k",alpha = 0.5,rasterized=True)
     ax1.set_aspect('equal')
-    ax1.set_title(animal + "\n animal position (y) vs decoded position (x)")
+    ax1.set_title(animal)
     
     #ax2.set_title("decoded position relative to stopping")
     
@@ -1148,6 +1228,8 @@ def plot_physical_vs_mental_position(animal,positions_abs,
     ax1.set_xlabel("decoded linearized loc (cm)")
     #ax2.set_ylabel("linearized location (cm)")
     #plt.gca().set_aspect('equal')
+    if save_name is not None:
+        plt.savefig(save_name, dpi = 300, bbox_inches = 'tight')
     return ax1
     
 def normalize_to_1(matrix):

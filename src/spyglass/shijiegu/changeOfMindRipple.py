@@ -16,7 +16,7 @@ from spyglass.common.common_position import IntervalPositionInfo, RawPosition, I
 
 from ripple_detection.core import segment_boolean_series
 
-from spyglass.shijiegu.Analysis_SGU import ChangeofMind,RippleTimesWithDecode
+from spyglass.shijiegu.Analysis_SGU import ChangeofMind,RippleTimesWithDecode,RippleTimesByParameters
 from spyglass.shijiegu.decodeHelpers import runSessionNames
 from spyglass.shijiegu.ripple_add_replay import plot_decode_spiking,select_subset_helper
 from spyglass.shijiegu.changeOfMind_triggered import return_change_of_mind_times_from_log
@@ -144,7 +144,7 @@ def restrict_time(log_df,linear_position_info,position_info,trial,t0,
     
     return actual_range
 
-def triggered_ripple_animal(animal, list_of_days, 
+def triggered_ripple_animal(animal, list_of_days, parameter_name = None,
                             encoding_set = None, classifier_param_name = None, decode_threshold_method = None,
                             nearby = False,
                             post = False, both = False, home_ripple = False,
@@ -169,6 +169,7 @@ def triggered_ripple_animal(animal, list_of_days,
         
             ranges_ses, ripple_ind_ses, ripple_durations_ses, trials_ses  = triggered_ripple_session(
                 nwb_copy_file_name,session_name,position_name,
+                parameter_name,
                 encoding_set = encoding_set,
                 classifier_param_name = classifier_param_name,
                 decode_threshold_method = decode_threshold_method,
@@ -201,8 +202,9 @@ def triggered_ripple_animal(animal, list_of_days,
             
     return ripple_ind, session_names, ranges, durations, trialIDs
 
-def triggered_ripple_session(nwb_copy_file_name,session_name,position_name,proportion = 0.1,
-                             nearby = False,
+def triggered_ripple_session(nwb_copy_file_name,session_name,position_name,parameter_name = "default_conservative",
+                             proportion = 0.1,
+                             nearby = False, 
                              encoding_set = None, classifier_param_name = None, decode_threshold_method = None,
                              post = False, both = False, home_ripple = False, trials_subset = None):
     """
@@ -224,6 +226,7 @@ def triggered_ripple_session(nwb_copy_file_name,session_name,position_name,propo
     linear_position_info=(IntervalLinearizedPosition() & {
             'nwb_file_name':nwb_copy_file_name,
             'interval_list_name':position_name,
+            'track_graph_name': '4 arm lumped 2023',
             'position_info_param_name':'default_decoding'}).fetch1_dataframe()
 
     position_info = (IntervalPositionInfo() & {
@@ -232,23 +235,26 @@ def triggered_ripple_session(nwb_copy_file_name,session_name,position_name,propo
             'position_info_param_name':'default_decoding'}).fetch1_dataframe()
         
     # 2. load stateScript
-    q = {"nwb_file_name": nwb_copy_file_name,
+    query = {"nwb_file_name": nwb_copy_file_name,
         "epoch":int(session_name[:2]),
-        "proportion":str(proportion)}
-    if len(ChangeofMind() & q) == 0:
+        "proportion":proportion}
+    if len(ChangeofMind() & query) == 0:
         print(f"No change of mind on session {nwb_copy_file_name}, epoch {session_name}.")
         return [], [], [], []
     
-    log_df = ChangeofMind().fetch1_dataframe(q)
+    log_df = ChangeofMind().fetch1_dataframe(query)
     
     # 3. load ripples
-    key = {"nwb_file_name": nwb_copy_file_name, "interval_list_name":session_name,
-           "encoding_set":encoding_set,"classifier_param_name":classifier_param_name,"decode_threshold_method": decode_threshold_method}
+    #key = {"nwb_file_name": nwb_copy_file_name, "interval_list_name":session_name,
+    #       "encoding_set":encoding_set,"classifier_param_name":classifier_param_name,"decode_threshold_method": decode_threshold_method}
     #ripple_times_query = (RippleTimes() & key).fetch1("ripple_times")
-    if len(RippleTimesWithDecode() & key) == 0:
+    key = {"nwb_file_name": nwb_copy_file_name, "epoch":int(session_name[:2]),
+           "parameter_name": parameter_name}
+    if len(RippleTimesByParameters() & key) == 0:
         return [], [], [], []
         
-    ripple_times_query = (RippleTimesWithDecode() & key).fetch1("ripple_times")
+    # ripple_times_query = (RippleTimesWithDecode() & key).fetch1("ripple_times")
+    ripple_times_query = (RippleTimesByParameters() & key).fetch1("ripple_times")
 
     if type(ripple_times_query) is dict:
         ripple_times = pd.DataFrame(ripple_times_query)
@@ -309,7 +315,7 @@ def triggered_ripple_session(nwb_copy_file_name,session_name,position_name,propo
     # loop through the ripple_times table
     ripple_indeces, ripple_durations = find_ripple_in_range(actual_ranges, ripple_times)
 
-    return actual_ranges, ripple_indeces, ripple_durations, rowID
+    return actual_ranges, ripple_indeces, ripple_durations, rowID # actual range is the range of time considered for each trial
 
 def find_ripple_in_range(actual_ranges,ripple_times):
     ripple_indeces = []   #this list tallies ripple near turn around time
@@ -353,3 +359,24 @@ def triggered_ripple_counterfactual_animal(animal, dates_to_plot, encoding_set, 
     (ranges, ripple_ind, session_names, ranges_nearby, ripple_ind_nearby, session_names_nearby) = triggered_ripple_animal(
         animal, dates_to_plot, encoding_set, classifier_param_name, decode_thresh, post = True, trials = trials_date_session_dict)
     return (ranges, ripple_ind, session_names, ranges_nearby, ripple_ind_nearby, session_names_nearby)
+
+
+def remote_ripple_identification(animal, dates_to_plot, data):
+    """data should have ripple_ind_both and session_names_both as fields"""
+    (positions1d_swr_all, positions2d_swr_all,
+     decodes1d_swr_all, decodes2d_swr_all,
+     info_swr_all, positions_infos_all)  = ([], [], [], [], [], [])
+    
+    for day in dates_to_plot:
+        positions1d_swr, positions2d_swr, decodes1d_swr, decodes2d_swr, info_swr, positions_infos = return_decode_pos_snippets(animal,day,
+                                                                                    data['ripple_ind_both'][day],
+                                                                                    data['session_names_both'][day],
+                                                                                    'default_conservative')
+        positions1d_swr_all.extend(positions1d_swr)
+        positions2d_swr_all.extend(positions2d_swr)
+        decodes1d_swr_all.extend(decodes1d_swr)
+        decodes2d_swr_all.extend(decodes2d_swr)
+        info_swr_all.extend(info_swr)
+        positions_infos_all.extend(positions_infos)
+        
+    return positions1d_swr_all, positions2d_swr_all, decodes1d_swr_all, decodes2d_swr_all, info_swr_all, positions_infos_all

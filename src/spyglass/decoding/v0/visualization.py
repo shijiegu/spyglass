@@ -43,7 +43,7 @@ def make_single_environment_movie(
         )
         ## Get zscore
         # Calculate mean and standard deviation
-        multiunit_firing_rate_subset = multiunit_firing_rate[position_info.head_speed >= 4]
+        multiunit_firing_rate_subset = multiunit_firing_rate #multiunit_firing_rate[position_info.head_speed >= 4]
         mean_val = multiunit_firing_rate_subset['firing_rate'].mean()
         std_val = multiunit_firing_rate_subset['firing_rate'].std() # By default, ddof=1 for sample standard deviation
 

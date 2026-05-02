@@ -8,7 +8,7 @@ import spikeinterface as si
 import xarray as xr
 from scipy.signal import find_peaks
 
-
+from spyglass.utils import SpyglassMixin
 from spyglass.common.common_ephys import Raw  # noqa: F401
 from spyglass.common.common_interval import IntervalList, interval_list_contains
 from spyglass.common.common_nwbfile import Nwbfile
@@ -36,7 +36,7 @@ from spyglass.shijiegu.helpers import mergeIntervals
 schema = dj.schema('shijiegu_trialanalysis')
 
 @schema
-class EpochPos(dj.Manual):
+class EpochPos(SpyglassMixin, dj.Manual):
     definition = """
     # trial by trial information of choice
     -> TaskEpoch
@@ -82,7 +82,7 @@ class EpochPos(dj.Manual):
         self.insert1(key,replace=replace)
 
 @schema
-class TrialChoice(dj.Manual):
+class TrialChoice(SpyglassMixin, dj.Manual):
     definition = """
     # trial by trial information of choice
     -> StateScriptFile
@@ -106,7 +106,7 @@ class TrialChoice(dj.Manual):
 
 
 @schema
-class TetrodeNumber(dj.Manual):
+class TetrodeNumber(SpyglassMixin, dj.Manual):
     definition = """
     # tetrode CHANNEL number for plotting data from various brain regions
     -> TaskEpoch
@@ -117,7 +117,7 @@ class TetrodeNumber(dj.Manual):
     """
 
 @schema
-class ChannelNumber(dj.Manual):
+class ChannelNumber(SpyglassMixin, dj.Manual):
     definition = """
     # tetrode CHANNEL number for various use
     -> TaskEpoch
@@ -137,7 +137,7 @@ class HSETimes(dj.Manual):
 
 
 @schema
-class MUA(dj.Manual):
+class MUA(SpyglassMixin, dj.Manual):
     definition = """
     # MUA trace
     -> IntervalList
@@ -149,13 +149,33 @@ class MUA(dj.Manual):
 
     
 @schema
-class MUATheta(dj.Manual):
+class MUATheta(SpyglassMixin, dj.Manual):
     definition = """
     # theta from sorted pyramidal cells
     -> TaskEpoch
     data_type: varchar(32)  # sorted_pyramidal, unsorted_mua, sorted_all, lfp
     ---
     theta_xr = NULL: blob   # theta table
+    """
+    
+@schema
+class ThetaZscore(SpyglassMixin, dj.Manual):
+    definition = """
+    # theta from sorted pyramidal cells
+    -> TaskEpoch
+    data_type: varchar(32)  # sorted_pyramidal, unsorted_mua, sorted_all, lfp
+    ---
+    zscore = NULL: blob   # theta table
+    """
+    
+@schema
+class MUAThetaNWB(SpyglassMixin, dj.Manual):
+    definition = """
+    # theta from sorted pyramidal cells
+    -> TaskEpoch
+    data_type: varchar(32)  # sorted_pyramidal, unsorted_mua, sorted_all, lfp
+    ---
+    -> AnalysisNwbfile
     """
     
     
@@ -228,7 +248,7 @@ def get_trial_tags(log):
     return log_df_tagged
 
 @schema
-class LFPBandArtifact(dj.Manual):
+class LFPBandArtifact(SpyglassMixin, dj.Manual):
     definition = """
     # artifact removed LFPBand
     -> LFPBand
@@ -249,7 +269,7 @@ class ExtendedRippleTimes(dj.Manual):
     """
 
 @schema
-class ThetaIntervals(dj.Manual):
+class ThetaIntervals(SpyglassMixin, dj.Manual):
     definition = """
     # theta intervals during mobility (>4cm/s)
     -> IntervalList
@@ -258,7 +278,7 @@ class ThetaIntervals(dj.Manual):
     """
 
 @schema
-class DecodeIngredients(dj.Manual):
+class DecodeIngredients(SpyglassMixin, dj.Manual):
     definition = """
     # ingredients to do decoded replay content
     -> IntervalList
@@ -269,7 +289,7 @@ class DecodeIngredients(dj.Manual):
     """
 
 @schema
-class DecodeIngredientsLikelihood(dj.Manual):
+class DecodeIngredientsLikelihood(SpyglassMixin, dj.Manual):
     definition = """
     # ingredients to do likelihood decoded replay content. Larger window size
     -> IntervalList
@@ -282,7 +302,7 @@ class DecodeIngredientsLikelihood(dj.Manual):
     """
 
 @schema
-class DecodeResultsLinear(dj.Manual):
+class DecodeResultsLinear(SpyglassMixin, dj.Manual):
     definition = """
     # decoded 1D replay content results
     -> IntervalList
@@ -293,7 +313,7 @@ class DecodeResultsLinear(dj.Manual):
     """
     
 @schema
-class DecodeResults2D(dj.Manual):
+class DecodeResults2D(SpyglassMixin, dj.Manual):
     definition = """
     # decoded 2D replay content results
     -> IntervalList
@@ -442,38 +462,76 @@ class TrialChoiceReplayTransition(dj.Manual):
         self.insert1(key,replace=replace)
         
 @schema
-class ChangeofMind(dj.Manual):
+class ChangeofMind(SpyglassMixin, dj.Manual):
     definition = """
     # trial by trial information of choice
     # with additional information such as if the trial is a ChangeofMind trial
     -> TrialChoice
     proportion: varchar(20)           # minimal amount of proportion the animal is in before it backed out
     ---
-    
     analysis_file_name : varchar(64)   # name of the nwb analysis file
     pandas_id : varchar(64)   # id of pandas table
     pandas = NULL: longblob  # pandas dataframe saved as dictionary, choice
     """
+    #def make(self,key,replace=False):
+    #    self.insert1(key,replace=replace)
+    
+    #def fetch1_dataframe(self,key):
+        # analysis_nwb_file_name = (ChangeofMind() & key).fetch1("analysis_file_name")
+        # analysis_file_abs_path = (AnalysisNwbfile() & {
+        #     "analysis_file_name":analysis_nwb_file_name}).fetch1('analysis_file_abs_path')
+        # with pynwb.NWBHDF5IO(analysis_file_abs_path, 'r',load_namespaces=True) as io:
+        #     nwb_file = io.read()
+        #     df = nwb_file.scratch["pandas_table"].to_dataframe()
+        # return df
+        
+    def fetch1_dataframe(self,key):
+        q = (ChangeofMind() & key).fetch1("pandas")
+        df = pd.DataFrame.from_dict(q)
+        return df
+    
+@schema
+class ChangeofMindTriggeredDecode(SpyglassMixin, dj.Manual):
+    definition = """
+    # change-of-mind triggered decode
+    -> ChangeofMind
+    parameter: varchar(64)  # parameter name
+    ---
+    -> AnalysisNwbfile
+    parameter_value: longblob  # parameter value
+    """
     def make(self,key,replace=False):
         self.insert1(key,replace=replace)
-    
+        
     def fetch1_dataframe(self,key):
-        analysis_nwb_file_name = (ChangeofMind() & key).fetch1("analysis_file_name")
+        analysis_nwb_file_name = (ChangeofMindTriggeredDecode() & key).fetch1("analysis_file_name")
         analysis_file_abs_path = (AnalysisNwbfile() & {
             "analysis_file_name":analysis_nwb_file_name}).fetch1('analysis_file_abs_path')
         with pynwb.NWBHDF5IO(analysis_file_abs_path, 'r',load_namespaces=True) as io:
             nwb_file = io.read()
-            df = nwb_file.scratch["pandas_table"].to_dataframe()
+            df = nwb_file.scratch["triggered"].to_dataframe()
         return df
     
-    # def fetch1_dataframe(self,key):
-    #     q = (ChangeofMind() & key).fetch1("pandas")
-    #     df = pd.DataFrame.from_dict(q)
-    #     return df
+@schema
+class Imu(SpyglassMixin, dj.Manual):
+    definition = """
+    # trial IMU tracking result
+    -> TrialChoice
+    trial: varchar(10)  # trial
+    parameter: varchar(64)  # parameter name
+    ---
+    pos_info = NULL: longblob  # tracking
+    """
+    def make(self,key,replace=False):
+        self.insert1(key,replace=replace)
         
+    def fetch1_dataframe(self,key):
+        q = (Imu() & key).fetch1("pos_info")
+        df = pd.DataFrame.from_dict(q)
+        return df
         
 @schema
-class ChangeofMindTheta(dj.Manual):
+class ChangeofMindTheta(SpyglassMixin,dj.Manual):
     definition = """
     # trial by trial information of choice
     # with additional information such as 
@@ -481,13 +539,9 @@ class ChangeofMindTheta(dj.Manual):
     # - initial arm choice
     # - initial C-O-M time
     # - max theta length at initial choice
-    -> TrialChoice
-    proportion: varchar(20)           # minimal amount of proportion the animal is in before it backed out
-    delta_t_minus: varchar(20)        # time in seconds, before change of mind that we look for theta decodes
-    delta_t_plus: varchar(20)         # time in seconds, after change of mind that we look for theta decodes
-    max_flag: int
+    -> ChangeofMindTriggeredDecode
+    local_parameter: varchar(40)     # time in seconds, the min duration of an event
     ---
-    analysis_file_name : varchar(64)   # name of the nwb analysis file
     pandas = NULL: longblob            # pandas dataframe saved as dictionary, choice
     """
     def make(self,key,replace=False):
@@ -508,18 +562,15 @@ class ChangeofMindTheta(dj.Manual):
         return df
 
 @schema
-class ChangeofMindRemoteTheta(dj.Manual):
+class ChangeofMindRemoteTheta(SpyglassMixin, dj.Manual):
     definition = """
     # trial by trial information of choice
     # with additional information such as 
     # - if the trial is a ChangeofMind trial
     # - remote theta times around C-O-M time
     # - parsed remote theta arm
-    -> TrialChoice
-    proportion: varchar(20)           # minimal amount of proportion the animal is in before it backed out
-    delta_t_minus: varchar(20)        # time in seconds, before change of mind that we look for theta decodes
-    delta_t_plus: varchar(20)         # time in seconds, after change of mind that we look for theta decodes
-    max_flag: int
+    -> ChangeofMindTriggeredDecode
+    remote_parameter: varchar(40)     # time in seconds, the min duration of an event
     ---
     pandas = NULL: longblob            # pandas dataframe saved as dictionary, choice
     """
@@ -533,15 +584,49 @@ class ChangeofMindRemoteTheta(dj.Manual):
         return df
 
 @schema
+class ChangeofMindRemoteSWR(dj.Manual):
+    definition = """
+    # trial by trial information of choice
+    # with additional information such as 
+    # - if the trial is a ChangeofMind trial
+    # - remote SWR times around C-O-M time
+    # - parsed SWR theta arm
+    -> ChangeofMind
+    parameter_name: varchar(64)  # parameter name
+    ---
+    pandas = NULL: longblob            # pandas dataframe saved as dictionary, choice
+    """
+    def make(self,key,replace=False):
+        self.insert1(key,replace=replace)
+
+    
+    def fetch1_dataframe(self,key):
+        q = (ChangeofMindRemoteSWR() & key).fetch1("pandas")
+        df = pd.DataFrame.from_dict(q)
+        return df
+    
+
+@schema
 class RippleTimes(dj.Manual):
     definition = """
     # ripple times
     -> IntervalList
     ---
-    ripple_times = NULL: blob   # ripple times within that interval
+    ripple_times = NULL: longblob   # ripple times within that interval
     ripple_times_04sd = NULL: blob   # ripple times within that interval
     ripple_times_1sd = NULL: blob   # ripple times within that interval
     ripple_times_2sd = NULL: blob   # ripple times within that interval
+    """
+
+@schema
+class RippleTimesByParameters(SpyglassMixin, dj.Manual):
+    definition = """
+    # ripple times
+    -> TrialChoice
+    parameter_name: varchar(20)      # parameter name used for ripple detection
+    ---
+    parameter_value = NULL: blob        # parameter value used for ripple detection
+    ripple_times = NULL: longblob   # ripple times within that interval
     """
 
 

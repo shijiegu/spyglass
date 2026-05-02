@@ -3,7 +3,7 @@ import xarray as xr
 import pandas as pd
 from scipy.signal import find_peaks
 from scipy.signal import filtfilt, lfilter
-from spyglass.shijiegu.Analysis_SGU import MUATheta, MUA
+from spyglass.shijiegu.Analysis_SGU import MUATheta, MUAThetaNWB, MUA
 from spyglass.shijiegu.ripple_add_replay import select_subset_helper
 from spyglass.shijiegu.theta_singleUnit import smoothen_mua, get_theta_from_mua
 
@@ -48,7 +48,7 @@ def calculate_session_theta_from_mua(nwb_copy_file_name, session_name):
     #mua_mean, mua_sd = q.fetch1("mean"), q.fetch1("sd")
     
     mua_smoothened = smoothen_mua(mua_xr) # 40 ms window smoothened
-    theta = get_theta_from_mua(mua_smoothened)
+    theta = get_theta_from_mua(mua_smoothened, 0)
     
     return theta
 

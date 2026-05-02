@@ -24,8 +24,11 @@ from spyglass.shijiegu.ripple_add_replay import select_subset_helper_pd
 
 from trodestrack.data.load_arthur_session import load_arthur_session
 from trodestrack.models.ekf import EKFConfig, extended_kalman_filter
-from spyglass.shijiegu.Analysis_SGU import ChangeofMindRemoteTheta
+from spyglass.shijiegu.Analysis_SGU import ChangeofMindRemoteTheta, Imu
+from spyglass.shijiegu.video import load_video_and_timestamps, make_mp4
+from trodestrack.data.visualize_filter_overlay_fast import create_filter_overlay_video_fast
 # interpolate
+from trodestrack.data.visualize_session import create_video_overlay
 
 
 def translate_time(trodes_sample_time,sample_count,time_seconds):
@@ -294,7 +297,21 @@ def prepare_data_for_tracking(extracted_imu_data, extracted_pos_data, imu_path, 
     return packed_data
 
 
-def run_trodes_tracking(packed_data):
+def run_trodes_tracking(packed_data,
+                        process_noise_x_pos = 0.02,
+                        process_noise_y_pos = 0.02,
+                        process_noise_x_vel = 2.0,
+                        process_noise_y_vel = 2.0,
+                        process_noise_z_vel = 2.0,
+                        process_noise_heading = 0.02,
+                        process_noise_gyro_bias = 2e-6,
+                        process_noise_accel_x_bias = 2e-4,
+                        process_noise_accel_y_bias = 2e-4,
+                        process_noise_accel_z_bias = 2e-4,
+                        measurement_noise_pos = 0.005**2,
+                        measurement_noise_heading = 0.05**2,
+                        damping_coeff = 0.1):
+    
     """run trodes tracking algorithm
 
     default values:
@@ -308,24 +325,30 @@ def run_trodes_tracking(packed_data):
     measurement_noise_heading = 0.05**2
     """
     
-    process_noise_heading = 0.02 #0.1
-    process_noise_pos =  0.02 #0.005 #0.02
-    process_noise_gyro_bias = 2e-6 #0.9
-    measurement_noise_pos = 0.005**2 #0.4**2
-    measurement_noise_heading = 0.05**2 #0.9**2
+    # process_noise_heading = 0.1 #0.1
+    # process_noise_pos =  0.02 #0.005 #0.02
+    # process_noise_gyro_bias = 0.1 #0.1 #0.9
+    # measurement_noise_pos = 0.01**2 #0.01**2 #0.005**2
+    # measurement_noise_heading = 0.1**2 #0.05**2 #0.1**2
 
     # Configure EKF for 2D camera + 3D IMU
     ekf_config = EKFConfig(
         state_mode="2d_cam_3d_imu",  # 10D state
-        process_noise_pos = process_noise_pos,
+        process_noise_x_pos = process_noise_x_pos,
+        process_noise_y_pos = process_noise_y_pos,
         process_noise_heading = process_noise_heading,
-        process_noise_vel=2.0,
+        process_noise_x_vel=process_noise_x_vel,
+        process_noise_y_vel=process_noise_y_vel,
+        process_noise_z_vel=process_noise_z_vel,
         process_noise_gyro_bias=process_noise_gyro_bias,#2e-6,
-        process_noise_accel_bias=2e-4,
+        process_noise_accel_x_bias=process_noise_accel_x_bias,
+        process_noise_accel_y_bias=process_noise_accel_y_bias,
+        process_noise_accel_z_bias=process_noise_accel_z_bias,
         measurement_noise_pos = measurement_noise_pos, #0.005**2,
         measurement_noise_heading = measurement_noise_heading,
-        damping_coeff=0.1,
+        damping_coeff=damping_coeff,
         led_distance=packed_data.led_distance,
+        use_heading_measurement=False, #Do not enable heading pseudo-measurement from LED geometry.
     )
     
     # Run filter
@@ -347,22 +370,78 @@ def run_trodes_tracking(packed_data):
     
     return inferred_position_x, inferred_position_y, inferred_heading, result
 
+default_imu_params = {
+    "process_noise_x_pos": 0.0002,
+    "process_noise_y_pos": 0.0004,
+    "process_noise_x_vel": 0.01,#2.0,
+    "process_noise_y_vel": 0.1,#2.0,
+    "process_noise_z_vel": 2e-4,#2.0,
+    "process_noise_heading": 0.02,#0.1,#0.02,
+    "process_noise_gyro_bias": 2e-6,#0.1,#2e-6,
+    "process_noise_accel_x_bias": 2,#2e-4,
+    "process_noise_accel_y_bias": 5,#2e-4,
+    "process_noise_accel_z_bias": 2e-4,
 
-def batch_process_animal(animal, list_of_days, output_folder, parent_folder = None):
+    "measurement_noise_pos": 0.01**2, #0.01**2,#0.005**2,
+    "measurement_noise_heading": 0.1**2, #0.1**2,#0.05**2,
+    "damping_coeff": 6}
+
+def batch_process_animal(animal, list_of_days, output_folder,
+                         theta_params = None, imu_params = None, parent_folder = None,
+                         do_tracking_only = True, use_reviewed = True,
+                         make_original_video = False, extract_raw_data = False):
     # for every day, loop through sessions.
     # and every session, loop through all change of mind trials with remote content
     # output_folder = '/stelmo/shijie/gyro/'
+    all_position_files = []
     if parent_folder is None:
         parent_folder = f"/stelmo/shijie/recording_pilot/{animal}/preprocessing/"
+    
+    if imu_params is None:
+        imu_params = default_imu_params
+        
+    if theta_params is None:
+
+        theta_params = {"minimum_duration_long": 0.03,
+                        "minimum_duration_remote": 0.02,
+                        "parameter_name_long": "params_both_max_segment_run_time_2_state",
+                        "parameter_name_remote": "params_both_max_run_time_2_state",
+                        "min_posterior": 0.2,
+                        "sd": 0.6,
+                        "proportion": 0.1,
+                        "hpd": False,
+                        }
+    
+    minimum_duration_long = theta_params["minimum_duration_long"]
+    sd = theta_params["sd"]
+    hpd = theta_params["hpd"]
+    minimum_duration_remote = theta_params["minimum_duration_remote"]
+    min_posterior = theta_params["min_posterior"]
+    q_long = {"proportion": 0.1,
+             "minimum_duration":theta_params["minimum_duration_long"],
+             "parameter":theta_params["parameter_name_long"],
+             "local_parameter":f"dur_{minimum_duration_long}_sd_{sd}_hpd{hpd}"
+             }
+
+    
+    q_remote = q_long.copy()
+    q_remote["parameter"] = theta_params["parameter_name_remote"]
+    q_remote["minimum_duration"] = theta_params["minimum_duration_remote"]
+    q_remote["remote_parameter"] = f"dur_{minimum_duration_remote}_sum_{min_posterior}" #f"parameter_name_remote
+        
 
     for d in list_of_days:
         result_day = {}
         
         nwb_file_name = f'{animal}{d}.nwb'
         nwb_copy_file_name = get_nwb_copy_filename(nwb_file_name)
+        
+        q_long["nwb_file_name"] = nwb_copy_file_name
+        q_remote["nwb_file_name"] = nwb_copy_file_name
 
         # Read in gyroscope_data_day
-        data_day = gyroscope_data_day(nwb_file_name, parent_folder)
+        if extract_raw_data:
+            data_day = gyroscope_data_day(nwb_file_name, parent_folder)
 
         # session information
         session_interval, position_interval = runSessionNames(nwb_copy_file_name)
@@ -370,14 +449,12 @@ def batch_process_animal(animal, list_of_days, output_folder, parent_folder = No
             session_name, pos_name = session_interval[session_ind], position_interval[session_ind]
             print(f"Working on session: {session_name}")
 
-            # trials of interest
-            q = {"nwb_file_name": nwb_copy_file_name,
-                "epoch":int(session_name[:2]),
-                "proportion":str(0.1),
-                "delta_t_minus":5,
-                "delta_t_plus":5}
+            q_long["epoch"] = int(session_name[:2])
+            q_remote["epoch"] = int(session_name[:2])
             
-            log_df = ChangeofMindRemoteTheta().fetch1_dataframe(q)
+            if len(ChangeofMindRemoteTheta() & q_remote) == 0:
+                continue
+            log_df = ChangeofMindRemoteTheta().fetch1_dataframe(q_remote)
             
             change_of_mind_trials = log_df[log_df.has_remote_interval].index
             print(f"Change of mind trials with remote content are: {change_of_mind_trials}")
@@ -390,45 +467,103 @@ def batch_process_animal(animal, list_of_days, output_folder, parent_folder = No
                 
                 trial1, trial2 = (trial, trial+1)
                 (t0, t1) = (log_df.loc[trial1].timestamp_H, log_df.loc[trial2].timestamp_O)
-                
-                extracted_imu_data = extract_gyro_data_in_interval(data_day[session_name], (t0, t1))
-                if len(extracted_imu_data['timestamps']) == 0:
-                    print(f"Skipping trial {trial} since no imu data found")
-                    print(nwb_copy_file_name, session_name, trial)
-                    continue
-                extracted_pos_data, table_original, meters_per_pixel = extract_position_data_in_interval(
-                    nwb_copy_file_name, (t0, t1), pos_name)
-        
                 imu_path = f'{output_folder}imu_{nwb_file_name}_{session_name}_trial{trial1}.parquet'  # the path to write imu data to
                 pos_path = f'{output_folder}position_{nwb_file_name}_{session_name}_trial{trial1}.parquet' # the path to write pos data to
+                all_position_files.append(pos_path)
         
-                packed_data = prepare_data_for_tracking(
-                    extracted_imu_data, extracted_pos_data, imu_path, pos_path, meters_per_pixel)
-                inferred_position_x, inferred_position_y, inferred_heading, result = run_trodes_tracking(packed_data)
+                print("\n", animal, nwb_copy_file_name, session_name, "trial ", trial)
+                print("imu path: ", imu_path)
+                print("pos path: ", pos_path)
+                
+                if make_original_video:
+                    cap, timestamps, meters_per_pixel = load_video_and_timestamps(nwb_copy_file_name, session_name)
+                    outputName = f'{output_folder}position_{nwb_file_name}_{session_name}_trial{trial}'
+                    make_mp4(cap, timestamps, t0, t1, outputName)
+        
+                if do_tracking_only:
+                    print("tracking...")
+                    try:
+                        extracted_pos_data = pd.read_parquet(pos_path)
+                    except:
+                        print(f"No extracted data found {nwb_copy_file_name}, {session_name}, trial {trial}.")
+                        continue
+                    
+                    extracted_imu_data = pd.read_parquet(imu_path)
+                    if len(extracted_imu_data) == 0:
+                        print(f"Skipping trial {trial} since no imu data found")
+                        print(f"No extracted data found {nwb_copy_file_name}, {session_name}, trial {trial}.")
+                        continue
+                    
+                    if use_reviewed:
+                        pos_path = f'{output_folder}position_{nwb_file_name}_{session_name}_trial{trial}_reviewed.parquet' # the path to write pos data to
+                        extracted_pos_data_subset = pd.read_parquet(pos_path)
+                        mask_cam = np.isin(extracted_pos_data.video_frame_ind, extracted_pos_data_subset.video_frame_ind)
+                    else:
+                        mask_cam = np.ones(len(extracted_pos_data)) > 0
+                        
+                    packed_data = load_arthur_session(pos_path, imu_path,
+                            verbose = True,
+                            imu_mode = "2d",  # Use full 6-axis IMU
+                            meters_per_pixel = 0.0025,
+                            mask_cam = mask_cam)
+                    
+                elif extract_raw_data:
+                    #IMU
+                    extracted_imu_data = extract_gyro_data_in_interval(data_day[session_name], (t0, t1))
+                    if len(extracted_imu_data['timestamps']) == 0:
+                        print(f"Skipping trial {trial} since no imu data found")
+                        print(nwb_copy_file_name, session_name, trial)
+                        continue
+                    # Position
+                    extracted_pos_data, table_original, meters_per_pixel = extract_position_data_in_interval(
+                        nwb_copy_file_name, (t0, t1), pos_name)
+        
+                
+                    packed_data = prepare_data_for_tracking(
+                        extracted_imu_data, extracted_pos_data, imu_path, pos_path, meters_per_pixel)
+                
+                imu_params_ = imu_params.copy()
+                imu_params_.pop("name")
+                inferred_position_x, inferred_position_y, inferred_heading, result = run_trodes_tracking(packed_data, **imu_params_)
 
                 result_trial = {}
                 result_trial["packed_data"] = packed_data
                 result_trial["result"] = result
 
                 # Define the file path
-                file_path = os.path.join(output_folder,f'tracking_{nwb_file_name}_{session_name}_trial{trial1}_result.pkl')
+                file_path = os.path.join(output_folder,f'tracking_{nwb_file_name}_{session_name}_trial{trial1}_param{imu_params["name"]}_result.pkl')
                 # Open the file in write binary mode ('wb') and save the data
                 with open(file_path, 'wb') as file:
                     pickle.dump(result_trial, file)
                 print(f"Data successfully saved to {file_path}")
+                
+                # save to spyglass
+                pos_info = load_tracking_result(output_folder, nwb_file_name, session_name,
+                                                trial, imu_params["name"])
+                key = {"nwb_file_name": get_nwb_copy_filename(nwb_file_name),
+                    "epoch": str(session_name[:2]),
+                    "trial": trial,
+                    "parameter": imu_params["name"],
+                    "pos_info": pos_info.to_dict()
+                    }
+                Imu().insert1(key, replace = True)
 
                 result_day[(nwb_file_name, session_name, trial1)] = result_trial
 
-        file_day_path = os.path.join(output_folder,f'tracking_{nwb_file_name}_result.pkl')
-        with open(file_day_path, 'wb') as file:
-            pickle.dump(result_day, file)
-        print(f"Data successfully saved to {file_day_path}")
-    return 1
+        if extract_raw_data:
+            # all day data
+            file_day_path = os.path.join(output_folder,f'tracking_{nwb_file_name}_param{imu_params["name"]}_result.pkl')
+            with open(file_day_path, 'wb') as file:
+                pickle.dump(result_day, file)
+            print(f"Data successfully saved to {file_day_path}")
+    return all_position_files
 
-def load_tracking_result(output_folder, nwb_file_name, session_name, trial):
+def load_tracking_result(output_folder, nwb_file_name, session_name, trial, param_name):
     """load tracking result from file
     """
-    file_path = os.path.join(output_folder,f'tracking_{nwb_file_name}_{session_name}_trial{trial}_result.pkl')
+    file_path = os.path.join(output_folder,f'tracking_{nwb_file_name}_{session_name}_trial{trial}_param{param_name}_result.pkl')
+                
+    #file_path = os.path.join(output_folder,f'tracking_{nwb_file_name}_{session_name}_trial{trial}_result.pkl')
     try:
         with open(file_path, 'rb') as file:
             result = pickle.load(file)
@@ -464,6 +599,94 @@ def load_tracking_data_position(output_folder, nwb_file_name, session_name, tria
         pos_table = pq.read_table(file)
     return pos_table.to_pandas()
                 
+                
+def do_test_on_a_trial(nwb_file_name, session_name, trial,
+                       make_sensor_video = True,
+                       make_original_video = True,
+                       make_filter_video = True,
+                       use_reviewed = False,
+                       use_table_result = False,
+                       parameters = None):
+    output_folder = "/stelmo/shijie/gyro/"
+    
+    nwb_copy_file_name = get_nwb_copy_filename(nwb_file_name)
+    cap, timestamps, meters_per_pixel = load_video_and_timestamps(nwb_copy_file_name, session_name)
+    
+    imu_path = f'{output_folder}imu_{nwb_file_name}_{session_name}_trial{trial}.parquet'  # the path to write imu data to
+    
+    pos_path = f'{output_folder}position_{nwb_file_name}_{session_name}_trial{trial}.parquet' # the path to write pos data to
+
+    # # write IMU data to parquet file
+    # extracted_imu_data = pd.read_parquet(imu_path)
+    # df = pd.DataFrame({"Headstage_GyroX": extracted_imu_data["Headstage_GyroX"], #X is roll
+    #                "Headstage_GyroY": extracted_imu_data["Headstage_GyroY"], #Y is pitch (milk lick associated head bobbing)
+    #                "Headstage_GyroZ": extracted_imu_data["Headstage_GyroZ"], #Z is yaw (rotation along xy)
+    #                "Headstage_AccelX": extracted_imu_data["Headstage_AccelY"],
+    #                "Headstage_AccelY": extracted_imu_data["Headstage_AccelX"],
+    #                "Headstage_AccelZ": extracted_imu_data["Headstage_AccelZ"]},
+    #                index = extracted_imu_data.index)
+    
+    # table = pa.Table.from_pandas(df)
+    # pq.write_table(table, imu_path)
+
+    extracted_pos_data = pd.read_parquet(pos_path)
+    if use_reviewed:
+        pos_path = f'{output_folder}position_{nwb_file_name}_{session_name}_trial{trial}_reviewed.parquet' # the path to write pos data to
+        extracted_pos_data_subset = pd.read_parquet(pos_path)
+        mask_cam = np.isin(extracted_pos_data.video_frame_ind, extracted_pos_data_subset.video_frame_ind)
+    else:
+        mask_cam = np.ones(len(extracted_pos_data)) > 0
+
+    if use_table_result:
+        file_path = os.path.join(output_folder,f'tracking_{nwb_file_name}_{session_name}_trial{trial}_param{parameters}_result.pkl')
+        with open(file_path, 'rb') as file:
+            result_file = pickle.load(file)
+        result = result_file["result"]
+        packed_data = result_file['packed_data']
+        inferred_position_x, inferred_position_y, inferred_heading = None, None, None
+    else:
+        packed_data = load_arthur_session(pos_path, imu_path,
+            verbose = True,
+            imu_mode = "2d",  # Use full 6-axis IMU
+            meters_per_pixel = meters_per_pixel,
+            mask_cam = mask_cam)
+        inferred_position_x, inferred_position_y, inferred_heading, result = run_trodes_tracking(
+            packed_data, **parameters)
+    
+    (t0, t1) = (extracted_pos_data.index[0], extracted_pos_data.index[-1])
+    
+    outputName = f'position_{nwb_file_name}_{session_name}_trial{trial}'
+    if make_original_video:
+        make_mp4(cap, timestamps, t0, t1, outputName)
+        
+    if make_sensor_video:
+        create_video_overlay(
+            video_path = outputName + '_rawposition.mp4',
+            data = packed_data,
+            imu_mode = "2d",
+            position_df = extracted_pos_data,
+            output_path = "overlay_3DIMU.mp4",
+            start_time=0.0,
+            duration=t1-t0,
+            fps=25.0,
+            gyro_ylim=(-200, 200),    # deg/s
+            accel_ylim=(-15, 15)      # m/s²
+        )
+    
+    if make_filter_video:
+        create_filter_overlay_video_fast(
+            video_path = outputName + '_rawposition.mp4',
+            data = packed_data,
+            filter_result = result,
+            t_filter = packed_data.t_cam,
+            position_df = extracted_pos_data,
+            output_path = f"filter_{nwb_file_name}_{session_name}_{trial}_default_parameter.mp4",
+            start_time=0.0,
+            duration=t1-t0,
+            plot_update_rate = None,
+            fps=25.0
+        )
+    return inferred_position_x, inferred_position_y, inferred_heading
 
 
         

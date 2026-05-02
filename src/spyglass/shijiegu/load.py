@@ -131,6 +131,7 @@ def load_epoch_data(nwb_copy_file_name,epoch_num,
     linear_position_df = xr.Dataset.from_dataframe((IntervalLinearizedPosition() &
                           {'nwb_file_name': nwb_copy_file_name,
                            'interval_list_name': epoch_pos_name,
+                           'track_graph_name': '4 arm lumped 2023',
                            'position_info_param_name': 'default_decoding'}
                          ).fetch1_dataframe())
 

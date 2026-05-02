@@ -16,6 +16,12 @@ import matplotlib.pyplot as plt
 import neo
 from elephant.conversion import BinnedSpikeTrain
 from scipy.signal import find_peaks
+from spyglass.shijiegu.load import load_run_sessions, load_theta
+from spyglass.shijiegu.Analysis_SGU import SingleUnit, MUATheta, TetrodeNumber, TrialChoice, ThetaZscore
+from spyglass.shijiegu.changeOfMind_figures.figure4d import load_theta_df
+from spyglass.shijiegu.decodeHelpers import session2position_name, runSessionNames
+from spyglass.common.common_position import IntervalPositionInfo
+from spyglass.utils.nwb_helper_fn import get_nwb_copy_filename
 
 def return_list_of_spike_train(nwb_copy_file_name, session_name, pyramidal_only = True):
     ## Return list of spike trains of pyramidal cells only
@@ -89,7 +95,7 @@ def mua_pyramidal_only(nwb_copy_file_name, session_name, bin_size = 10 * pq.ms):
     return mua_xr
 
 def make_phase_from_amplitude(amplitude_xr, datafield = 'mua'):
-    min_peak_distance = 0.110 # seconds, minimum distance between peaks
+    min_peak_distance = 0.1 # seconds, minimum distance between peaks
     min_peak_distance_samples = int(min_peak_distance / (amplitude_xr.time[1] - amplitude_xr.time[0]).item())
     
     if datafield == 'mua':
@@ -98,7 +104,9 @@ def make_phase_from_amplitude(amplitude_xr, datafield = 'mua'):
         data = amplitude_xr.rightside
     else:
         data = amplitude_xr.leftside
+
     peak_ind,_ = find_peaks(np.array(data), distance = min_peak_distance_samples)
+    print("len(peak_ind)", len(peak_ind))
     
     phase_values = np.arange(len(peak_ind)) * 2 * np.pi #unwrap phase to be increasing
     time_points = np.array(amplitude_xr.time)[peak_ind]
@@ -110,7 +118,7 @@ def make_phase_from_amplitude(amplitude_xr, datafield = 'mua'):
     theta_xr = xr.Dataset(
         data_vars={
             "0": (("time"), y), #legacy format for theta
-            "amplitude": (("time"), y),
+            "amplitude": (("time"), np.array(data)),
             "phase": (("time"), interpolated_phase % (2*np.pi)),
         },
         coords={
@@ -121,16 +129,19 @@ def make_phase_from_amplitude(amplitude_xr, datafield = 'mua'):
     return theta_xr
 
 
-def get_theta_from_mua(mua, window_size = 0.04):
+def get_theta_from_mua(mua, window_size = 0.04): # 0.04
     ## find theta peak:
     ## To establish a common reference phase,
     #  a phase histogram (π/6 or 30° bin size) of aggregate single (principal) cell firing
     #  in CA1 was calculated across locomotor periods for each recording day;
     #  the phase of maximal CA1 firing was then defined to be 0° (Skaggs et al., 1996), with the half-cycle offset (±π) corresponding to the phase segregating individual cycles.
-        
-    mua_smoothened = smoothen_mua(mua, moving_ave_window = window_size) #40ms window
+       
+    if  window_size > 0:
+        mua = smoothen_mua(mua, moving_ave_window = window_size) #40ms window
+    else:
+        mua = mua
     
-    theta_mua_xr = make_phase_from_amplitude(mua_smoothened, datafield = 'mua')
+    theta_mua_xr = make_phase_from_amplitude(mua, datafield = 'mua')
     return theta_mua_xr
     
     
@@ -199,3 +210,78 @@ def moving_average_filtfilt(data, window_size):
     # Apply the filter using filtfilt for zero-phase filtering
     smoothed_data = filtfilt(b, a, data)
     return smoothed_data
+
+def get_theta_from_cc(nwb_copy_file_name,session_name,datafield = 'rightside'):
+    # load theta and also make theta phase
+    theta_data,theta_timestamps = load_theta(nwb_copy_file_name,session_name)
+    
+    CCTetrodeInd = (TetrodeNumber() & {'nwb_file_name': nwb_copy_file_name,
+                                            'epoch':session_name[:2]}).fetch1('cc_tetrode_ind')
+
+    if len(CCTetrodeInd) == 1:
+        colnames = ["rightside"]
+    else:
+        CCTetrodeInd = CCTetrodeInd[:2]
+        colnames = ["rightside", "leftside"]
+    theta_df = pd.DataFrame(data=theta_data[:,CCTetrodeInd], index=theta_timestamps, columns=colnames)
+    theta_df.index.name='time'
+    theta_df = theta_df.rename(columns={'0': 'rightside', '1': 'leftside'})
+    theta_df=xr.Dataset.from_dataframe(theta_df)
+
+    theta_with_phase = make_phase_from_amplitude(theta_df, datafield = datafield)
+
+    return theta_with_phase
+
+from scipy import interpolate
+def zscore_theta(nwb_copy_file_name,session_name,data_type,use_spyglass = False):
+    # load theta
+    key = {"nwb_file_name": nwb_copy_file_name,
+        "epoch": str(session_name[:2]),
+        "data_type":data_type}
+    theta_pd = load_theta_df(key, spyglass = use_spyglass)
+
+    # load position info
+    position_info = (IntervalPositionInfo() & {
+                'nwb_file_name':nwb_copy_file_name,
+                'interval_list_name':session2position_name(nwb_copy_file_name, session_name),
+                'position_info_param_name':'default_decoding'}).fetch1_dataframe()
+
+    # find all bins of theta with animal velocity >= 4cm/s
+    f_nearest = interpolate.interp1d(np.array(position_info.index),
+                                    position_info.head_speed,
+                                    bounds_error=False,
+                                    kind='nearest',
+                                    fill_value=np.nan)
+    speed_interp = f_nearest(np.array(theta_pd.time))
+
+    print("before speed thresholding: length of",len(theta_pd), int(np.min(np.diff(theta_pd.time)) * len(theta_pd) / 60),"min of recording")
+    theta_pd = theta_pd[speed_interp >= 4]
+    print("after speed thresholding: length of",len(theta_pd), int(np.min(np.diff(theta_pd.time)) * len(theta_pd) / 60),"min of recording")
+    
+    # calculate mean amplitude and sd
+    mean = np.mean(theta_pd.amplitude ** 2)
+    sd = np.std(theta_pd.amplitude ** 2)
+    
+    return theta_pd, mean, sd
+
+
+def zscore_theta_animal(animal, list_of_days, data_type, use_spyglass = False):
+
+    for day in list_of_days:
+        nwb_file_name = animal.lower() + day + '.nwb'
+        nwb_copy_file_name = get_nwb_copy_filename(nwb_file_name)
+        session_interval, position_interval = runSessionNames(nwb_copy_file_name)
+        for ind in range(len(session_interval)):
+            session_name = session_interval[ind]
+            
+            theta_pd, mean, sd = zscore_theta(
+                nwb_copy_file_name, session_name, data_type, use_spyglass = use_spyglass)
+            
+            key = {"nwb_file_name":nwb_copy_file_name,
+                   "epoch":int(session_name[:2]),
+                   "data_type":data_type,
+                    "zscore": {"mean": mean, "sd": sd}}
+            ThetaZscore().insert1(key, replace = True)
+    
+    return 1
+    

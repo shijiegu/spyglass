@@ -1,0 +1,2 @@
+This will go to output.txt
+So will this.

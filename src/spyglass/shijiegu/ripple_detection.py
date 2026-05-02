@@ -36,7 +36,19 @@ from spyglass.common.common_position import IntervalPositionInfo
 
 MIN_RIPPLE_LENGTH_IN_S = 0.02
 
-def ripple_detection_master(nwb_file_name, epochID, speed_threshold = 4, conservative = True):
+def find_last_not_nan(arr):
+    # Create a boolean mask of non-NaN values
+    not_nan_mask = ~np.isnan(arr)
+
+    # Filter the array to keep only non-NaN values
+    clean_arr = arr[not_nan_mask]
+
+    # The last value in the filtered array is the last non-NaN value
+    last_non_nan_value = clean_arr[-1]
+    return last_non_nan_value
+
+def ripple_detection_master(nwb_file_name, epochID,
+                            speed_threshold = 4, conservative = True, fieldname = 'artifact removed filtered data'):
     nwb_copy_file_name=get_nwb_copy_filename(nwb_file_name)
 
     # find epoch/session name and position interval name
@@ -52,7 +64,7 @@ def ripple_detection_master(nwb_file_name, epochID, speed_threshold = 4, conserv
 
     # Ripple Band LFP
     filtered_lfps, filtered_lfps_t, CA1TetrodeInd, CCTetrodeInd = loadRippleLFP_OneChannelPerElectrode(
-        nwb_copy_file_name,epoch_name,position_valid_times)
+        nwb_copy_file_name,epoch_name,position_valid_times,fieldname = fieldname)
 
     electrodes = get_electrodes_table(nwb_copy_file_name, epoch_name)
 
@@ -70,7 +82,7 @@ def ripple_detection_master(nwb_file_name, epochID, speed_threshold = 4, conserv
         )
 
         trial_1_t = StateScript.loc[1].timestamp_O
-        trial_last_t = StateScript.loc[len(StateScript)-1].timestamp_O
+        trial_last_t = find_last_not_nan(np.array(StateScript.timestamp_O)) #StateScript.loc[len(StateScript)-1].timestamp_O
 
         t_ind = np.logical_and(filtered_lfps_t >= trial_1_t, filtered_lfps_t <= trial_last_t)
         filtered_lfps_t = filtered_lfps_t[t_ind]
@@ -253,7 +265,7 @@ def loadRippleLFP(nwb_copy_file_name,
            "artifact_params_name":"ampl_100_prop_05_2ms",
            'filter_name': 'Ripple 150-250 Hz'}
     
-    if fieldname == "filtered data" or (animal_name == "eliot"):
+    if fieldname == "filtered data":
         ripple_nwb_file_name = (LFPBand & key).fetch1('analysis_file_name')
     else:
         ripple_nwb_file_name = (LFPBandArtifact & key).fetch1('analysis_nwb_file_name')
@@ -327,9 +339,12 @@ def loadRippleLFP_OneChannelPerElectrode(nwb_copy_file_name,
         electrodes.index = np.arange(len(electrodes))
         CA1TetrodeInd = []
         for e in groups_with_cell:
-            CA1TetrodeInd.append(electrodes[np.logical_and(electrodes['group_name']==str(e),
+            q = electrodes[np.logical_and(electrodes['group_name']==str(e),
                                                            electrodes['bad_channel'] == False)
-                                            ].index[0])
+                                            ]
+            if len(q) == 0:
+                continue
+            CA1TetrodeInd.append(q.index[0])
 
     ## get reference electrode index
     CCTetrodeInd = []
@@ -983,6 +998,7 @@ def Gu_ripple_detector(time, filtered_lfps, speed, sampling_frequency,
 
 def removeArtifactInFilteredData(nwb_copy_file_name, session_interval_name,
                     filter_name = 'Ripple 150-250 Hz', interp = False,
+                    field_name = 'artifact removed',
                     artifact_params_name = 'ampl_100_prop_05_2ms',broadband_zscore = 3):
     
     ripple_nwb_file_name = (LFPBand & {'nwb_file_name': nwb_copy_file_name,
@@ -1062,7 +1078,7 @@ def removeArtifactInFilteredData(nwb_copy_file_name, session_interval_name,
                 filtered_data[nan_ind,t]= np.interp(timestamps[nan_ind], timestamps[~nan_ind], filtered_data[~nan_ind,t])
 
         # write processed ripple data back to nwb
-        eseries_name = 'artifact removed filtered data'
+        eseries_name = field_name
         es = pynwb.ecephys.ElectricalSeries(name=eseries_name,
                                             data=filtered_data,
                                             electrodes=electrodes,
@@ -1085,6 +1101,7 @@ def removeArtifactInFilteredData(nwb_copy_file_name, session_interval_name,
     key['analysis_nwb_file_name'] = ripple_nwb_file_copy_name
 
     LFPBandArtifact.insert1(key,replace = True)
+    return 1
 
 def multiunit_HSE_detector(
     time,

@@ -31,36 +31,52 @@ overlap_size_dict = {"default_decoding_gpu_4armMaze_W20msO10ms": 0.01,
               }
 
 
-def return_diff_file(nwb_copy_file_name, session_name, classifier_param_name):
-    window_size = window_size_dict[classifier_param_name]#int(classifier_param_name.split("_")[-1][1:3]) * 0.001 
-    overlap_size = overlap_size_dict[classifier_param_name] #int(classifier_param_name.split("_")[-1][6:8]) * 0.001
+def return_diff_file(nwb_copy_file_name, session_name, classifier_param_name, encoding_set):
+    
     #pos_name = session2position_name(nwb_copy_file_name, session_name)
 
     # load decode
     decode_path = (DecodeResultsLinear & {"nwb_file_name":nwb_copy_file_name,
                            "interval_list_name":session_name,
-                           "classifier_param_name":classifier_param_name}).fetch1("posterior")
+                           "classifier_param_name":classifier_param_name,
+                           "encoding_set": encoding_set}).fetch1("posterior")
     decode = xr.open_dataset(decode_path)
     
-    ## load LinearPosition
-    pos1d = pd.read_csv((DecodeIngredientsLikelihood & {"nwb_file_name":nwb_copy_file_name,
-                                   "interval_list_name":session_name,
-                                  "window_size":window_size,
-                                  "overlap_size":overlap_size}).fetch1("position_1d"))
+    if "ms" in classifier_param_name:
+        # likelihood decoder
+        likelihood = True
+        
+        window_size = window_size_dict[classifier_param_name]#int(classifier_param_name.split("_")[-1][1:3]) * 0.001 
+        overlap_size = overlap_size_dict[classifier_param_name] #int(classifier_param_name.split("_")[-1][6:8]) * 0.001
     
-    pos2d = pd.read_csv((DecodeIngredientsLikelihood & {"nwb_file_name":nwb_copy_file_name,
-                                   "interval_list_name":session_name,
-                                  "window_size":window_size,
-                                  "overlap_size":overlap_size}).fetch1("position_2d"))
+        ## load LinearPosition
+        pos1d = pd.read_csv((DecodeIngredientsLikelihood & {"nwb_file_name":nwb_copy_file_name,
+                                    "interval_list_name":session_name,
+                                    "window_size":window_size,
+                                    "overlap_size":overlap_size}).fetch1("position_1d"))
+        
+        pos2d = pd.read_csv((DecodeIngredientsLikelihood & {"nwb_file_name":nwb_copy_file_name,
+                                    "interval_list_name":session_name,
+                                    "window_size":window_size,
+                                    "overlap_size":overlap_size}).fetch1("position_2d"))
+    else:
+        likelihood = False
+        ## load LinearPosition
+        pos1d = pd.read_csv((DecodeIngredients & {"nwb_file_name":nwb_copy_file_name,
+                                    "interval_list_name":session_name}).fetch1("position_1d"))
+        
+        pos2d = pd.read_csv((DecodeIngredients & {"nwb_file_name":nwb_copy_file_name,
+                                    "interval_list_name":session_name}).fetch1("position_2d"))
+        
 
     diff_by_arm = {}
     for arm in [1,2,3,4]:
-        diff = return_diff(arm, decode, pos1d, pos2d)
+        diff = return_diff(arm, decode, pos1d, pos2d, likelihood)
         diff_by_arm[arm] = diff
     return diff_by_arm
 
 # find all moving time, when rat in arm1
-def return_diff(arm, decode, pos1d, pos2d):
+def return_diff(arm, decode, pos1d, pos2d, likelihood):
 
     segment = arm + 5
     
@@ -80,7 +96,10 @@ def return_diff(arm, decode, pos1d, pos2d):
     # get max likelihood position for all time
     position_axis = np.array(decode.coords['position'])
     
-    posterior_position_subset = decode_subset.likelihood.sum(dim='state')
+    if likelihood:
+        posterior_position_subset = decode_subset.likelihood.sum(dim='state')
+    else:
+        posterior_position_subset = decode_subset.causal_posterior.sum(dim='state')
     max_posterior_position = np.array(position_axis[posterior_position_subset.argmax(dim = 'position')])
     
     tracking = np.array(pos1d_subset.linear_position)
