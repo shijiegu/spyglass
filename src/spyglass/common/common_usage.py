@@ -17,7 +17,7 @@ from tqdm import tqdm
 from spyglass.common.common_nwbfile import AnalysisNwbfile, Nwbfile
 from spyglass.settings import debug_mode, test_mode
 from spyglass.utils import SpyglassMixin, SpyglassMixinPart, logger
-#from spyglass.utils.dandi_file_updates import update_analysis_for_dandi_standard
+from spyglass.utils.dandi_file_updates import update_analysis_for_dandi_standard
 from spyglass.utils.dj_graph import RestrGraph
 from spyglass.utils.dj_helper_fn import make_file_obj_id_unique
 from spyglass.utils.nwb_helper_fn import get_linked_nwbs

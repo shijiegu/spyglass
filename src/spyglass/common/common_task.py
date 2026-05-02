@@ -1,5 +1,4 @@
 import datajoint as dj
-import ndx_franklab_novela
 import pynwb
 
 from spyglass.common.common_device import CameraDevice  # noqa: F401
@@ -177,7 +176,7 @@ class TaskEpoch(SpyglassMixin, dj.Imported):
         # map camera ID (in camera name) to camera_name
 
         for device in nwbf.devices.values():
-            if isinstance(device, ndx_franklab_novela.CameraDevice):
+            if is_nwb_obj_type(device, "CameraDevice"):
                 # get the camera ID
                 camera_id = int(str.split(device.name)[1])
                 camera_names[camera_id] = device.camera_name

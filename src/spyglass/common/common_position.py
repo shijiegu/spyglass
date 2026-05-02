@@ -113,7 +113,7 @@ class IntervalPositionInfo(SpyglassMixin, dj.Computed):
 
     def make(self, key):
         """Insert smoothed head position, orientation and velocity."""
-        logger.info(f"Computing position for: {key}")
+        self._info_msg(f"Computing position for: {key}")
 
         analysis_file_name = AnalysisNwbfile().create(key["nwb_file_name"])
 
@@ -215,10 +215,11 @@ class IntervalPositionInfo(SpyglassMixin, dj.Computed):
                     **time_comments,
                 )
             else:
-                logger.info(
-                    "No video frame index found. Assuming all camera frames "
-                    + "are present."
-                )
+                if not test_mode:
+                    logger.info(
+                        "No video frame index found. Assuming all camera "
+                        + "frames are present."
+                    )
                 velocity.create_timeseries(
                     name="video_frame_ind",
                     unit="index",
@@ -469,7 +470,7 @@ class IntervalPositionInfo(SpyglassMixin, dj.Computed):
 
         # set orientation to NaN in single LED data
         if np.all(front_LED == 0) or np.all(back_LED == 0):
-            logger.warning(
+            self._warn_msg(
                 "Single LED data detected. Setting orientation to NaN."
             )
             orientation = np.full_like(orientation, np.nan)
@@ -569,7 +570,7 @@ class PositionVideo(SpyglassMixin, dj.Computed):
         """
         M_TO_CM = 100
 
-        logger.info("Loading position data...")
+        self._info_msg("Loading position data...")
 
         nwb_dict = dict(nwb_file_name=key["nwb_file_name"])
 
@@ -587,7 +588,7 @@ class PositionVideo(SpyglassMixin, dj.Computed):
             }
         ).fetch1_dataframe()
 
-        logger.info("Loading video data...")
+        self._info_msg("Loading video data...")
         epoch = get_position_interval_epoch(
             key["nwb_file_name"], key["interval_list_name"]
         )
@@ -626,7 +627,7 @@ class PositionVideo(SpyglassMixin, dj.Computed):
         position_time = np.asarray(position_info_df.index)
         cm_per_pixel = nwb_video.device.meters_per_pixel * M_TO_CM
 
-        logger.info("Making video...")
+        self._info_msg("Making video...")
         self.make_video(
             f"{video_dir}/{video_filename}",
             centroids,
