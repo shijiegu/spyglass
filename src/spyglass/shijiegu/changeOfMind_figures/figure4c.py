@@ -33,7 +33,7 @@ def get_position_decode_data_day(animal, day, decoder_type, hpd_flag = False, do
     
     params_pre = f"params_pre_{decoder_string}_2_state"
     params_post = f"params_post_{decoder_string}_2_state"
-    params_pre_control =  f"params_pre_control_{decoder_string}_2_state"
+    params_pre_control =  f"params_pre_control_{decoder_string}_2_state_5seconds"
     params_post_control =  f"params_post_control_{decoder_string}_2_state"
 
     # position info
@@ -197,22 +197,45 @@ def load_day_decode(animal, day,
 
     return decodes
 
-def return_distance_day(position_data_pre, decode_data_pre, fix_range = None):
+def return_distance_day(position_data_pre, decode_data_pre, fix_range = None, return_speed = False):
+    if return_speed:
+        diff_all = []
+        speed_all = []
+        N_all = []
+        
+        for rendition_ind in range(len(position_data_pre)):
+            fix_range_ = random.choice(fix_range) if fix_range is not None else None
+            diff, speed, N = return_distance_max(position_data_pre[rendition_ind],
+                                   decode_data_pre[rendition_ind],
+                                   fix_range_, 
+                                   return_speed = True)
+            diff_all.append(diff)
+            speed_all.append(speed)
+            N_all.append(N)
+
+        return np.array(diff_all), np.array(speed_all), np.array(N_all)
+    
     diff_all = []
     for rendition_ind in range(len(position_data_pre)):
         diff = return_distance_max(position_data_pre[rendition_ind],
                                    decode_data_pre[rendition_ind], random.choices(fix_range)[0] if fix_range is not None else None)
         diff_all.append(diff)
+        
+        
     return np.array(diff_all)
 
-def return_distance_max(position_data, decode_data, fix_range = None):
+def return_distance_max(position_data, decode_data, fix_range = None, return_speed = False):
     if fix_range is not None:
         ind = np.logical_and(position_data >= fix_range[0], position_data <= fix_range[1])
         if np.sum(ind) == 0:
+            if return_speed:
+                return np.nan, np.nan, np.nan
             return np.nan
         position_data = position_data[ind]
         decode_data = decode_data[ind]
     diff_max = np.nanmax(np.abs(position_data - decode_data))
+    if return_speed:
+        return diff_max, np.nanmax(position_data)-np.nanmin(position_data), len(position_data)
     return diff_max 
 
 def make_GLM_xy(animals, data1_animals, data2_animals):
@@ -240,6 +263,62 @@ def make_GLM_xy(animals, data1_animals, data2_animals):
 
     GLM_xy = np.array(GLM_xy)
     return GLM_xy
+
+def make_GLM_xy_version2(animals, data1_animals, data2_animals, condition1_animals, condition2_animals):
+    GLM_xy = []
+    for animal in animals:
+        data1 = data1_animals[animal]
+        data2 = data2_animals[animal]
+        condition1 = condition1_animals[animal]
+        condition2 = condition2_animals[animal]
+        # if any of data1, data2, condition1, condition2 is nan at the same ind, then drop that index
+        valid_ind1 = ~(np.isnan(data1) | np.isnan(condition1))
+        valid_ind2 = ~(np.isnan(data2) | np.isnan(condition2))
+        data1 = data1[valid_ind1]
+        data2 = data2[valid_ind2]
+        condition1 = condition1[valid_ind1]
+        condition2 = condition2[valid_ind2]
+        animal_category = [a == animal for a in animals]
+        for ind in range(len(data1)):
+            if np.isnan(data1[ind]):
+                continue
+            GLM_xy.append(animal_category + [
+                data1[ind],
+                condition1[ind],
+                0])
+        
+        for ind in range(len(data2)):
+            if np.isnan(data2[ind]):
+                continue
+            GLM_xy.append(animal_category + [
+                data2[ind],
+                condition2[ind],
+                1])
+
+    GLM_xy = np.array(GLM_xy)
+    return GLM_xy
+
+def do_GLM_version2(animals, GLM_xy, condition1, condition2):
+    ## Model 1: no theta or with theta
+    feature_dict = {f"Rat {animals[animal_ind][0].upper()}":GLM_xy[:,animal_ind] for animal_ind in range(len(animals))}
+    feature_dict[condition1] = GLM_xy[:, (len(animals))]
+    if condition2 is not None:
+        feature_dict[condition2] = GLM_xy[:, (len(animals) + 1)]
+
+    X = pd.DataFrame(feature_dict)
+    if len(animals) == 1:
+        pass
+    else:
+        X = sm.add_constant(X)
+    y = GLM_xy[:,-1]
+
+    """a) Mixed Linear Effect"""
+    ols_model = sm.Logit(y,X)
+    ols_result1 = ols_model.fit()
+
+    print("Mixed Logistic Effect \n",ols_result1.summary())
+    
+    return ols_result1, y, X
 
 def do_GLM(animals, GLM_xy, condition1, condition2):
     ## Model 1: no theta or with theta
@@ -469,7 +548,7 @@ def plot_2D_distance_distribution(animals, param = None, savename = "prepost_2D_
         parts_post['cmeans'].set_edgecolor('black')
     
         loc_x, loc_y = animal_ind, animal_ind + dx
-        _, p_value = ttest_rel(d_pre, d_post, alternative = "less")
+        _, p_value = ttest_rel(d_pre, d_post)
         print(f"{animal}: p value: ",p_value)
         if p_value < 0.05:
             annotations.append((loc_x, loc_y, np.round(p_value, 4)))
@@ -621,20 +700,34 @@ def make_distance_plot(animal, days, hpd_flag = False, output_folder = None, dec
 
         assert len(position_pre) == len(position_post)
     
-    diff_pre = return_distance_day(position_pre, decode_pre)
+    diff_pre, max_pos_pre, N_pre = return_distance_day(position_pre, decode_pre, fix_range = None, return_speed = True)
     diff_post = return_distance_day(position_post, decode_post)
     
     pos_range = [[np.nanmin(pos), np.nanmax(pos)] for pos in position_pre]
-    diff_pre_control = return_distance_day(
-        position_pre_control, decode_pre_control, fix_range = pos_range)
+    diff_pre_control, _, _2 = return_distance_day(
+        position_pre_control, decode_pre_control, fix_range = pos_range, return_speed = True)
+    
+    _, max_pos_pre_control, N_pre_control = return_distance_day(
+        position_pre_control, decode_pre_control, fix_range = None, return_speed = True)
+    
 
     pos_range = [[np.nanmin(pos), np.nanmax(pos)] for pos in position_post]
     diff_post_control = return_distance_day(
         position_post_control, decode_post_control, fix_range = pos_range)
-
+    
+    # calculate speed for pre and pre_control
+    speed_pre = max_pos_pre / (N_pre * 0.002) #each bin is 2ms
+    speed_pre_control = max_pos_pre_control / (N_pre_control * 0.002)
+    small_n_ind = N_pre_control < 250 # data with at least 0.5 second of data (250 bins) to calculate average speed
+    speed_pre_control[small_n_ind] = np.nan
+    
+    small_n_ind = N_pre < 250
+    speed_pre[small_n_ind] = np.nan
+    
     diff_pre_old = diff_pre.copy()
     ind = check_nan(diff_pre_old, diff_post)
     diff_pre = diff_pre[ind]
     diff_post = diff_post[ind]
+    speed_pre = speed_pre[ind]
     
-    return diff_pre, diff_post, diff_pre_control, diff_post_control
+    return diff_pre, diff_post, diff_pre_control, diff_post_control, speed_pre, speed_pre_control

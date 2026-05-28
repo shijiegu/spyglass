@@ -582,6 +582,28 @@ class ChangeofMindRemoteTheta(SpyglassMixin, dj.Manual):
         q = (ChangeofMindRemoteTheta() & key).fetch1("pandas")
         df = pd.DataFrame.from_dict(q)
         return df
+    
+@schema
+class ChangeofMindRemoteThetaTime(SpyglassMixin, dj.Manual):
+    definition = """
+    # trial by trial information of choice
+    # with additional information such as 
+    # - if the trial is a ChangeofMind trial
+    # - remote theta times around C-O-M time
+    # - parsed remote theta arm
+    -> ChangeofMindTriggeredDecode
+    remote_parameter: varchar(40)     # time in seconds, the min duration of an event
+    ---
+    pandas = NULL: longblob            # pandas dataframe saved as dictionary, choice
+    """
+    def make(self,key,replace=False):
+        self.insert1(key,replace=replace)
+
+    
+    def fetch1_dataframe(self,key):
+        q = (ChangeofMindRemoteThetaTime() & key).fetch1("pandas")
+        df = pd.DataFrame.from_dict(q)
+        return df
 
 @schema
 class ChangeofMindRemoteSWR(dj.Manual):

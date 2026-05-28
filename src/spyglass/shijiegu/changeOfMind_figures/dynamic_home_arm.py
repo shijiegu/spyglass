@@ -15,6 +15,8 @@ from spyglass.shijiegu.changeOfMind_figures.figure3_thetaGLM import check_interv
 from spyglass.shijiegu.changeOfMind_figures.figure4d import select_subset_helper_pd2, segment_boolean_series, setdiff1d_stable, unique_stable, find_future_arm
 from spyglass.common.common_position import TrackGraph, IntervalLinearizedPosition, IntervalPositionInfo
 from spyglass.shijiegu.changeOfMind_triggered import region
+from spyglass.shijiegu.changeOfMind_figures.figure4d import load_theta_df
+from spyglass.shijiegu.changeOfMind_figures.supp_thetacycle_concentration import theta_amplitude_to_cycle
 
 parameter_name_long_theta = "params_both_max_segment_run_time_2_state"
 parameter_name_remote = "params_both_max_run_time_2_state"
@@ -314,9 +316,178 @@ def return_num_of_arms(animal, list_of_days, sd = sd):
                     
     return num_of_arms, remote_time_spent, contain_long, contain_home, remote_arm_content, remote_trial_infos, rewards
                 
+def return_intvl(intervals, theta_pd):
+    N = 0
+    for intvl in intervals: 
+        theta_subset = theta_pd[(theta_pd.time >= intvl[0]) & (theta_pd.time <= intvl[-1])]
+        cycle_times = theta_amplitude_to_cycle(theta_subset)
+        N += len(cycle_times)
+    return N
 
+def return_remote_time(animal, list_of_days, sd = sd, theta_type = "mua"):
+    # remote_flag or local_flag
 
+    if animal == "molly":
+        seq = seq2
+    elif animal == "eliot":
+        seq = seq2
+    elif animal == "klein":
+        seq = rev2
+    elif animal == "julio":
+        seq = seq2
+    elif animal == "lewis":
+        seq = rev2
 
+    remote_time_spent = []
+    remote_trial_infos = []
+    rewards = []
+    Ns_remote = []
+    Ns_long = []
+    long_time_spent = []
+    
+    for day_ind in range(len(list_of_days)):
+        day = list_of_days[day_ind]
+        
+        nwb_file_name = animal.lower() + day + '.nwb'
+        nwb_copy_file_name = get_nwb_copy_filename(nwb_file_name)
+        print(nwb_copy_file_name)
+        session_interval, position_interval = runSessionNames(nwb_copy_file_name)
+            
+        q_long = {"proportion": 0.1,
+                 "minimum_duration":minimum_duration_long,
+                  "parameter":parameter_name_long_theta,
+                  "local_parameter":f"dur_{minimum_duration_long}_sd_{sd}_hpd{hpd}"
+                 }
+
+        q_long["nwb_file_name"] = nwb_copy_file_name
+        q_remote = q_long.copy()
+        q_remote["parameter"] = parameter_name_remote
+        q_remote["minimum_duration"] = minimum_duration_remote
+        q_remote["remote_parameter"] = f"dur_{minimum_duration_remote}_sum_{min_posterior}" #f"parameter_name_remote
+    
+        for session_name in session_interval:
+            key = {"nwb_file_name": nwb_copy_file_name,
+                    "epoch": str(session_name[:2]),
+                    "data_type": theta_type}
+            theta_pd = load_theta_df(key, spyglass = True)
+            
+            q_long["epoch"] = int(session_name[:2])
+            q_remote["epoch"] = int(session_name[:2])
+
+            if len(ChangeofMindRemoteTheta() & q_remote) > 0:
+                remote_df = ChangeofMindRemoteTheta().fetch1_dataframe(q_remote) # trials with remote theta for now
+            else:
+                remote_df = []
+                
+            if len(ChangeofMindTheta() & q_long) > 0:
+                long_df = ChangeofMindTheta().fetch1_dataframe(q_long)         # trials with long theta
+            
+                
+            # load triggered position data
+            loaded_data = load_triggered_position_decode_session_spyglass(nwb_copy_file_name, int(session_name[:2]),
+                                                               "params_both_max_segment_run_time_2_state", 0.1)
+            if len(loaded_data.keys()) == 0:
+                continue
+            
+            trial_infos = loaded_data['triggered_trial_info']
+            positions_in_arm = loaded_data["triggered_positions_baseoff"]
+    
+            # change of mind trials
+            df = ChangeofMind().fetch1_dataframe(q_remote)
+            theta_df_subset = df[df.change_of_mind]
+            
+            
+            position1d = (IntervalLinearizedPosition() & {
+                            'nwb_file_name':nwb_copy_file_name,
+                            'interval_list_name':session2position_name(nwb_copy_file_name, session_name),
+                            'track_graph_name': '4 arm lumped 2023',
+                            'position_info_param_name':'default_decoding'}).fetch1_dataframe() #for debug use only
+    
+            trialID_last = -1
+            for ind in range(len(trial_infos)):
+                trialID = trial_infos[ind][0]
+                current_arm = trial_infos[ind][-1]
+                if trialID != trialID_last:
+                    trialID_count = 1
+                    trialID_last = trialID
+                else:
+                    trialID_count += 1
+                
+                # time spent
+                time = positions_in_arm[ind].index
+                t0 = time[0]
+                t1 = time[-1]
+                time_spent = t1 - t0
+            
+                
+                # find future arm the animal goes to
+                last_reward = theta_df_subset.loc[trialID].past_reward
+                if np.isnan(last_reward):
+                    continue
+                else:
+                    last_reward = int(last_reward)
+                if df.loc[trialID].CoMNum_by_arm == 1 and df.loc[trialID].CoMNum_by_time == 1:
+                    reward = theta_df_subset.loc[trialID].rewardNum == 2
+                else:
+                    future = find_future_arm(t1, df.loc[trialID].timestamp_O, position1d, current_arm)
+                    if future == -1: # this means statescript and camera data disagree, corrupt data
+                        continue
+                    reward = future == seq[last_reward]
+                    
+                if len(remote_df) > 0:
+                    contain_remote_theta = check_interval_exists(
+                            remote_df.loc[trialID].remote_interval, t0, t1)
+                else:
+                    contain_remote_theta = False
+                    
+                if len(long_df) > 0:
+                    contain_long_theta = check_interval_exists(
+                        long_df.loc[trialID].long_theta_intervals, t0, t1)
+                else:
+                    contain_long_theta = False
+
+                # remote theta interval
+                if contain_remote_theta:
+                    remote_intervals, index = return_interval(remote_df.loc[trialID].remote_interval, t0, t1)
+
+                    # get total duration of remote_intervals
+                    time_spent = np.sum([interval[1]-interval[0] for interval in remote_intervals])
+                    
+                    # get number of theta cycles
+                    N_remote = return_intvl(remote_intervals, theta_pd)
+                    Ns_remote.append(N_remote)
+     
+                    # time spent
+                    remote_time_spent.append(time_spent)
+                    
+                    # trial info
+                    remote_trial_infos.append((nwb_file_name, session_name, trialID))# reward
+                    
+                    #reward = theta_df_subset.loc[trialID].rewardNum == 2
+                    rewards.append(reward)
+
+                else:
+                    rewards.append(reward)
+                    Ns_remote.append(0)
+                    remote_time_spent.append(0)
+                    remote_trial_infos.append((nwb_file_name, session_name, trialID))
+                
+                if contain_long_theta:
+                    long_intervals, _ = return_interval(long_df.loc[trialID].long_theta_intervals, t0, t1)
+                    
+                    # get total duration of long_intervals
+                    time_spent_long = np.sum([interval[1]-interval[0] for interval in long_intervals])
+                    
+                    # get number of theta cycles
+                    N_long = return_intvl(long_intervals, theta_pd)
+                    Ns_long.append(N_long)
+                    long_time_spent.append(time_spent_long)
+                else:
+                    Ns_long.append(0)
+                    long_time_spent.append(0)
+                      
+                    
+    return Ns_remote, remote_time_spent, remote_trial_infos, rewards, Ns_long, long_time_spent
     
     
     
@@ -480,6 +651,108 @@ def GLM_correctness1(contain_home_animals, num_animals, long_theta_animals, rewa
     ## Model 1: no theta or with theta
     feature_dict = {f"Rat {animals[animal_ind][0].upper()}":GLM_xy[:,animal_ind] for animal_ind in range(len(animals))}
     feature_dict["rep. of alternatives"] = GLM_xy[:,len(animals)]
+
+    X = pd.DataFrame(feature_dict)
+    X = sm.add_constant(X)
+    y = GLM_xy[:,-1]
+
+    """a) Mixed Linear Effect"""
+    np.random.seed(2026)
+    ols_model = sm.Logit(y,X)
+    ols_result1 = ols_model.fit()#ols_model.fit_regularized(method='l1', alpha=0.01, L1_wt=0)#.fit(method='bfgs', maxiter=1000)
+    
+    return ols_model, ols_result1
+
+def GLM_correctness_local(contain_home_animals, num_animals, long_theta_animals, reward_animals):
+    # GLM to predict max proportion based on whether remote theta contains home, or only outer arm
+    
+    animals = ["molly", "eliot", "klein", "julio", "lewis"]#list(contain_home_animals.keys())
+    GLM_xy = []
+    for animal in animals:
+        contain_home = contain_home_animals[animal]
+        num = np.array(num_animals[animal])
+        rewards = reward_animals[animal]
+        long_theta = long_theta_animals[animal]
+        
+        animal_category = [a == animal for a in animals]
+        for ind in range(len(contain_home)):
+            GLM_xy.append(animal_category + [
+                int(long_theta[ind] > 0), rewards[ind]
+            ])
+        
+    GLM_xy = np.array(GLM_xy)
+    
+    ## Model 1: no theta or with theta
+    feature_dict = {f"Rat {animals[animal_ind][0].upper()}":GLM_xy[:,animal_ind] for animal_ind in range(len(animals))}
+    feature_dict["local extended"] = GLM_xy[:,len(animals)]
+
+    X = pd.DataFrame(feature_dict)
+    X = sm.add_constant(X)
+    y = GLM_xy[:,-1]
+
+    """a) Mixed Linear Effect"""
+    np.random.seed(2026)
+    ols_model = sm.Logit(y,X)
+    ols_result1 = ols_model.fit()#ols_model.fit_regularized(method='l1', alpha=0.01, L1_wt=0)#.fit(method='bfgs', maxiter=1000)
+    
+    return ols_model, ols_result1
+
+def GLM_correctness_remote(contain_home_animals, num_animals, long_theta_animals, reward_animals):
+    # GLM to predict max proportion based on whether remote theta contains home, or only outer arm
+    
+    animals = ["molly", "eliot", "klein", "julio", "lewis"]#list(contain_home_animals.keys())
+    GLM_xy = []
+    for animal in animals:
+        contain_home = contain_home_animals[animal]
+        num = np.array(num_animals[animal])
+        rewards = reward_animals[animal]
+        long_theta = np.array(long_theta_animals[animal])
+        num[long_theta] -= 1 # if long theta exists, add one more arm to the representation of alternatives
+        
+        
+        animal_category = [a == animal for a in animals]
+        for ind in range(len(contain_home)):
+            GLM_xy.append(animal_category + [
+                int(num[ind] > 0), rewards[ind]
+            ])
+        
+    GLM_xy = np.array(GLM_xy)
+    
+    ## Model 1: no theta or with theta
+    feature_dict = {f"Rat {animals[animal_ind][0].upper()}":GLM_xy[:,animal_ind] for animal_ind in range(len(animals))}
+    feature_dict["remote"] = GLM_xy[:,len(animals)]
+
+    X = pd.DataFrame(feature_dict)
+    X = sm.add_constant(X)
+    y = GLM_xy[:,-1]
+
+    """a) Mixed Linear Effect"""
+    np.random.seed(2026)
+    ols_model = sm.Logit(y,X)
+    ols_result1 = ols_model.fit()#ols_model.fit_regularized(method='l1', alpha=0.01, L1_wt=0)#.fit(method='bfgs', maxiter=1000)
+    
+    return ols_model, ols_result1
+
+def GLM_correctness_time(time_spent_animals, label, reward_animals):
+    # GLM to predict max proportion based on whether remote theta contains home, or only outer arm
+    
+    animals = ["molly", "eliot", "klein", "julio", "lewis"]#list(contain_home_animals.keys())
+    GLM_xy = []
+    for animal in animals:
+        time_spent_animals_ = time_spent_animals[animal]
+        rewards = reward_animals[animal]
+        
+        animal_category = [a == animal for a in animals]
+        for ind in range(len(time_spent_animals_)):
+            GLM_xy.append(animal_category + [
+                time_spent_animals_[ind], rewards[ind]
+            ])
+        
+    GLM_xy = np.array(GLM_xy)
+    
+    ## Model 1: no theta or with theta
+    feature_dict = {f"Rat {animals[animal_ind][0].upper()}":GLM_xy[:,animal_ind] for animal_ind in range(len(animals))}
+    feature_dict[label] = GLM_xy[:,len(animals)]
 
     X = pd.DataFrame(feature_dict)
     X = sm.add_constant(X)

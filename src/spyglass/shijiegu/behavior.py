@@ -8,10 +8,12 @@ import numpy as np
 import xarray as xr
 import logging
 import multiprocessing
-from spyglass.shijiegu.Analysis_SGU import TrialChoice, ChangeofMind
+from spyglass.shijiegu.Analysis_SGU import TrialChoice, ChangeofMind, ChangeofMindRemoteTheta
 from spyglass.shijiegu.decodeHelpers import runSessionNames
 from spyglass.utils.nwb_helper_fn import get_nwb_copy_filename
 from spyglass.shijiegu.changeOfMind import color_by_rat
+from spyglass.common.common_position import IntervalPositionInfo, RawPosition, IntervalLinearizedPosition
+from spyglass.shijiegu.decodeHelpers import runSessionNames, session2position_name
 
 
 seq1=[1,3,2,4]
@@ -424,6 +426,19 @@ def get_com_num_animal(animal, days_to_plot, proportion_threshold = 0.1):
             q = {"nwb_file_name":nwb_copy_file_name,
                  "epoch":int(session_name[:2]), "proportion": proportion_threshold}
             q_result = ChangeofMind() & q
+            # position_name = session2position_name(nwb_copy_file_name, session_name)
+            # query = IntervalLinearizedPosition & {
+            #     "nwb_file_name":nwb_copy_file_name, 
+            #     "position_info_param_name": "default",
+            #     "interval_list_name":position_name,
+            #     'track_graph_name': '4 arm lumped 2023'
+            #     }
+            # if len(query) == 0:
+            #     print('No linear position info found for session: ' + session_name)
+            #     continue
+            # linear_position_info = query.fetch1_dataframe()
+            # print('Finished Fetching linear position info for session: ' + session_name)
+            
             if len(q_result) == 0:
                 continue
             info_table = ChangeofMind().fetch1_dataframe(q)
@@ -432,7 +447,12 @@ def get_com_num_animal(animal, days_to_plot, proportion_threshold = 0.1):
                 continue
             
             CoMNum_by_arm = np.array(info_table.CoMNum_by_arm)
-            com_num_day = CoMNum_by_arm[CoMNum_by_arm > 0]
+            CoMNum_by_time = np.array(info_table.CoMNum_by_time)
+
+            # element-wise max between CoMNum_by_arm and CoMNum_by_time, to be conservative in counting COM trials
+            CoMNum_by_arm_time = np.maximum(CoMNum_by_arm, CoMNum_by_time)
+            com_num_day = CoMNum_by_arm_time[CoMNum_by_arm_time > 0]
+            #print(com_num_day)
             com_num.extend(com_num_day.tolist())
         
     return com_num

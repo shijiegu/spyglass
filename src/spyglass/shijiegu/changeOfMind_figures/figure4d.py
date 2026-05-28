@@ -230,6 +230,200 @@ def find_choice_animal(animal, list_of_days, parameter_name, proportion = 0.1, m
     #tally_dict_arm = {key:np.unique(tally_dict_arm[key]) for key in tally_dict_arm.keys()}
     return tally_dict_arm
 
+def trial_to_features_supp(tally_dict, correct_sequence, minimum_duration =0.02, proportion = 0.1, debug = False):
+    # current arm is nan if not parsing multiple change of mind. 
+    
+    """for each trial implicated in remote replay. translate to GLM feature:
+           is choice t-1.   is previous rewarded choice.   is future.    is the correct future.    ...     last in remote replay?    abs time in remote replay. 
+    arm 1           0                   0                       1                       1                   0                           0.2
+    arm 2           1                   1                       0                       0                   1                           0.1
+    arm 3           0                   0                       1                       1                   0                           0.3
+    arm 4           0                   0                       1                       1                   0                           0
+    Args:
+        tally_dict (dict): it looks like this:
+        {   ('lewis20240105_.nwb','02_Rev2Session1',70): [(0, array([1.70448169e+09, 1.70448169e+09]), 2)],
+            ('lewis20240105_.nwb','02_Rev2Session1',98): [(0, array([1.70448251e+09, 1.70448251e+09]), 2),
+                                                       (0, array([1.70448251e+09, 1.70448251e+09]), 3),
+                                                       (1, array([1.70448251e+09, 1.70448251e+09]), 2),
+                                                       (1, array([1.70448251e+09, 1.70448251e+09]), 3)],
+        }
+    """
+    if correct_sequence.lower() == "seq2":
+        seq = seq2
+    elif correct_sequence.lower() == "rev2":
+        seq = rev2
+    elif correct_sequence.lower() == "seq1":
+        seq = seq1
+    elif correct_sequence.lower() == "rev1":
+        seq = rev1
+    session_name_old = None
+    nwb_copy_file_name_old = None
+    
+    features_all = []
+    response_all = []
+    trial_info_all = []
+    home_visit_all = []
+    home_replay_all = []
+    home_trial_info_all = []
+    for key in tally_dict:
+    
+        nwb_copy_file_name, session_name, trialID = key
+
+        if session_name != session_name_old or nwb_copy_file_name_old != nwb_copy_file_name:
+            # new session
+            
+            session_name_old = session_name
+            nwb_copy_file_name_old = nwb_copy_file_name
+            position_name = session2position_name(nwb_copy_file_name, session_name)
+            
+            # 1.1. 
+            q = {"nwb_file_name": nwb_copy_file_name,
+                "epoch":int(session_name[:2]),
+                "minimum_duration": minimum_duration,
+                "proportion":str(proportion)}
+                
+            log_df = ChangeofMind().fetch1_dataframe(q)
+            
+            position1d = (IntervalLinearizedPosition() & {
+                            'nwb_file_name':nwb_copy_file_name,
+                            'interval_list_name':position_name,
+                            'track_graph_name': '4 arm lumped 2023',
+                            'position_info_param_name':'default_decoding'}).fetch1_dataframe() #for debug use only
+        
+        intervals_to_consider = np.unique([_[0] for _ in tally_dict[key]])
+        
+            
+        # for each change of mind incidence
+        for interval_id in intervals_to_consider:
+            arms = np.unique([_[2] for _ in tally_dict[key] if _[0] == interval_id])
+            print("arms", arms)
+            interval = np.concatenate([_[1] for _ in tally_dict[key] if _[0] == interval_id])
+            
+            # find the last arm that is > 0 that corresponds to the last interval
+            last_arm_list = [_[2] for _ in tally_dict[key] if _[0] == interval_id and _[2] > 0]
+            if len(last_arm_list) == 0:
+                print("No arm with identity > 0 in this interval:", nwb_copy_file_name, session_name, trialID, interval_id)
+                continue
+            last_arm = int(last_arm_list[-1])
+            
+            # for each arm, find the total duration of this arm during all intervals
+            time_arm = {arm: np.sum([_[1][1] - _[1][0] for _ in tally_dict[key] if _[0] == interval_id and _[2] == arm]) for arm in [1,2,3,4]}
+            
+            t0 = np.min(interval)
+            outer_arms = arms[arms > 0]
+            
+            # all future intervals on this trial
+            next_intervals_ = [_[0] for _ in tally_dict[key] if _[0] > interval_id]
+            if len(next_intervals_) > 0:
+                t2 = np.min(next_intervals_)
+            else:
+                t2 = log_df.loc[trialID].timestamp_O
+            
+            if len(outer_arms) == 0:
+                print("No outer arm replay:", nwb_copy_file_name, session_name, trialID)
+                #continue
+            
+            # get this trial's info
+            if np.isnan(log_df.loc[trialID].past_reward) or np.isnan(log_df.loc[trialID].past):
+                continue
+                       
+            reward = int(log_df.loc[trialID].rewardNum == 2)
+            
+            recent = int(log_df.loc[trialID].past)
+            
+            recent_reward = int(log_df.loc[trialID].past_reward)
+            
+            future_correct = int(seq[recent_reward])
+            
+            # current arm
+            current_arm = unique_stable(select_subset_helper_pd2(position1d,(t0,t0+0.1)).track_segment_id)
+            
+            # past
+            if log_df.loc[trialID].CoMNum_by_arm == 1 and log_df.loc[trialID].CoMNum_by_time == 1:
+                immediate_past = recent
+                print("\n")
+                print("trial ID:", trialID)
+                print("current_arm", current_arm)
+                print("recent:", recent)
+                
+            else:
+                current_arm = current_arm[current_arm > 5]
+                t_home = log_df.loc[trialID].timestamp_H
+                immediate_past = find_past_arm(t_home, t0, position1d, current_arm - 5, recent)
+                print("\n")
+                print("trial ID:", nwb_copy_file_name, session_name, trialID)
+                print("current_arm", current_arm - 5)
+                print("recent:", recent)
+                print("immediate_past:", immediate_past)
+                if immediate_past == -1 or np.isnan(immediate_past): # this means statescript and camera data disagree, corrupt data
+                    immediate_past = recent
+
+                
+            if log_df.loc[trialID].CoMNum_by_arm == 1 and log_df.loc[trialID].CoMNum_by_time == 1:
+                future = int(log_df.loc[trialID].OuterWellIndex)
+            else:
+                # print("parsing multiple change of mind")
+                t1 = log_df.loc[trialID].timestamp_O
+                #continue
+                current_arm = current_arm[current_arm > 5]
+                future = find_future_arm(t0, t1, position1d, current_arm - 5)
+                if future == -1: # this means statescript and camera data disagree, corrupt data
+                    continue
+                
+                print("trial ID:", nwb_copy_file_name, session_name, trialID)
+                print("current_arm for future", current_arm - 5)
+                print("future:", future)
+            
+            # find after each interval if there is a home visit
+            if log_df.loc[trialID].CoMNum_by_arm == 1 and log_df.loc[trialID].CoMNum_by_time == 1:
+                t1 = log_df.loc[trialID].timestamp_O
+            else:
+                t1 = t2
+            position1d_subset = select_subset_helper_pd2(position1d,(t0,t1))
+            track_segment_id_bool = np.array(position1d_subset.track_segment_id) == 0
+            track_segment_id_bool = pd.Series(track_segment_id_bool, index = position1d_subset.index)
+            home_intervals = segment_boolean_series(track_segment_id_bool, minimum_duration=0.2)
+            outer_arms_after = [np.min(
+                    select_subset_helper_pd2(position1d,(home_interval[0],home_interval[1]
+                                                                        )).linear_position
+                    ) for home_interval in home_intervals]
+            home_visit = np.any(np.array(outer_arms_after) < 30) # home visit if linearized position < 30
+     
+                
+            ##### parse if arm being switch-side or same-side
+            last_trial_arm = int(log_df.loc[trialID].past)
+            same_side_arm = same_side_map[last_trial_arm]
+            switch_side_arms = switch_side_map[last_trial_arm]        
+                
+            feature_dict = {"recent":[immediate_past],
+                            "recent_reward":[recent_reward],
+                            "future":[future],
+                            "future_correct":[future_correct],
+                            "same_side_arm":same_side_arm,
+                            "switch_side_arms":switch_side_arms,
+                            "home_visit":home_visit}
+            
+            features, response, home_visit, home_replay = arm_to_features(arms, feature_dict)
+            # concatenate last_in_replay and time in replay to features
+            features = np.concatenate((features, np.array([int(arm == last_arm) for arm in [1,2,3,4]]).reshape(-1,1),
+                                       np.array([time_arm[arm] for arm in [1,2,3,4]]).reshape(-1,1)), axis = 1)
+            #assert np.sum(np.array(response) > 0) > 0
+            
+            # convert current arm to 1 indexing
+            current_arm = int(current_arm[0] - 5)
+            if len(outer_arms) > 0:
+                features_all.append(features)
+                response_all.append(response)
+                trial_info_all.append((nwb_copy_file_name,session_name, trialID,current_arm, reward))
+                home_trial_info_all.append((nwb_copy_file_name,session_name, trialID,home_visit, reward))
+                home_visit_all.append(home_visit)
+                home_replay_all.append(home_replay)
+            
+    if debug:
+        return features_all, response_all, trial_info_all
+    return features_all, response_all, trial_info_all, home_visit_all, home_replay_all, home_trial_info_all
+
+
 def consolidate(arm_identities, time_intervals):
     
     arm_set, indices =  remove_contiguous_duplicates_and_get_last_indices(arm_identities)

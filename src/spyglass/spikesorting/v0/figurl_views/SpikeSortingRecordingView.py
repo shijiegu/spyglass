@@ -1,7 +1,7 @@
 from typing import List, Union
 
 import datajoint as dj
-import kachery_cloud as kcl
+#import kachery_cloud as kcl
 import numpy as np
 import spikeinterface as si
 from sortingview.SpikeSortingView import create_raw_traces_plot

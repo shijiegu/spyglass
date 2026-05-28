@@ -23,6 +23,7 @@ from spyglass.shijiegu.ripple_add_replay import plot_decode_spiking,select_subse
 from spyglass.shijiegu.load import load_decode
 from spyglass.shijiegu.pairwiseDecode import behavior_transitions_count
 from spyglass.shijiegu.changeOfMind_helper import findProportion
+from sklearn.preprocessing import StandardScaler
 
 # in the linearized track, segment 0 correspond to home, 1 to platform etc.
 labels={}
@@ -1040,7 +1041,7 @@ def form_null_model(triggered_positions, triggered_decodes, noise_var = None, qu
         noise_var = np.nanvar(distance)
     
     gaussian_process = GaussianProcessRegressor(
-        kernel=kernel, alpha=noise_var, n_restarts_optimizer=9
+        kernel=kernel, alpha=noise_var, n_restarts_optimizer=9,
     ) #Due to multiple local optima, the optimizer can be started repeatedly by specifying n_restarts_optimizer
     gaussian_process.fit(X_train, Y_train)
 

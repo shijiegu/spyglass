@@ -96,18 +96,20 @@ def save_data(example, proportion_threshold, output_folder,
       end = log_df.loc[t,'timestamp_O']
 
       # restrict to this trial's position info
-      # trialInd = (linear_position_df.index >= start) &(linear_position_df.index <= end)
-      # trialPosInfo = linear_position_df.loc[trialInd,:]
-      # trialPosInfo = trialPosInfo.tail(int(120*camera_frequency)) #use at most xx seconds prior to nose poke at the outer well.
-      # proportion, track_segment_id, max_proportion, turnaround_time = findProportion(trialPosInfo, camera_frequency)
+      trialInd = (linear_position_df.index >= start) &(linear_position_df.index <= end)
+      trialPosInfo = linear_position_df.loc[trialInd,:]
+      #trialPosInfo = trialPosInfo.tail(int(120*camera_frequency)) #use at most xx seconds prior to nose poke at the outer well.
+      proportion, track_segment_id, max_proportion, turnaround_time = findProportion(trialPosInfo, camera_frequency)
       # turnaround_t = turnaround_time[ind]
-      turnaround_t =  log_df.loc[t,'initial_time']
+      #turnaround_t =  log_df.loc[t,'initial_time']
       
       # 4. turnaround_t, mua_xr_zscore,
       #turnaround_t = log_df.loc[t,"initial_time"] 
-      t0 = turnaround_t
+      turnaround_t = turnaround_time
+      t0 = turnaround_time
     
-      plottimes = [turnaround_t + tx, turnaround_t + ty]
+      plottimes = [turnaround_t[0] + tx, turnaround_t[0] + ty]
+      
       plot_filename = f"{animal}_{nwb_copy_file_name}_{session_name}_trial{t}_{np.round(plottimes[0],2)}_{np.round(plottimes[1],2)}"
       # if likelihood:
       #       plot_data_filename = f"data_{animal}_{nwb_copy_file_name}_{session_name}_trial{t}_likelihood.pkl"
@@ -294,9 +296,7 @@ def plot_behavior(plottimes,linear_position_subset,posterior_position_subset,
       if turnaround is not None:
             for turn_ind in range(np.shape(turnaround)[0]):
                   for axes_id in [0,1,2,3,4,5]:
-                        axes[axes_id].axvspan(turnaround[turn_ind][0], turnaround[turn_ind][1], color = "red", alpha = 0.1)
-                        axes[axes_id].axvspan(turnaround[turn_ind][0], turnaround[turn_ind][1], color = "red", alpha = 0.1)
-                        axes[axes_id].axvspan(turnaround[turn_ind][0], turnaround[turn_ind][1], color = "red", alpha = 0.1)
+                        axes[axes_id].axvspan(turnaround[turn_ind][0], turnaround[turn_ind][1], color = "red", alpha = 0.3)
             
       """well locations"""
       # linear_map,node_location=get_linearization_map()
@@ -383,7 +383,10 @@ def plot_decode_spiking(plottimes,linear_position_subset,posterior_position_subs
       for ind in axes_ind:
             axes[ind].scatter(linear_position_subset.time,
                         np.array(linear_position_subset.linear_position),
-                        s=location_size, color='magenta', zorder=10)
+                        s=location_size, color='magenta', alpha = 0.8, zorder=10)
+            # axes[ind].plot(linear_position_subset.time,
+            #             np.array(linear_position_subset.linear_position),
+            #             linewidth=location_size, color='magenta', zorder=10)
             # position_ = np.array(linear_position_subset.linear_position)
             # subset_ind = np.logical_and(position_ >= np.min(positions[5-ind]), position_ <= np.max(positions[5-ind]))
             

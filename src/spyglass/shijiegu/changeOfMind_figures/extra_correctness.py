@@ -1,4 +1,5 @@
 import os
+import pandas as pd
 import numpy as np
 import pickle
 from spyglass.utils.nwb_helper_fn import get_nwb_copy_filename
@@ -74,6 +75,7 @@ def model2numbers(ols_result):
     coef_est = np.array(ols_result.params)
     pvalues = ols_result.pvalues
     CI = ols_result.conf_int(alpha=0.05)
+    
     #yerr = np.vstack((np.array(CI[0]).reshape((1,-1)), np.array(CI[1]).reshape((1,-1)))) # 2 x coefficients
 
     coef_names_subset_ind = ["Rat" not in name and "cons" not in name for name in coef_names]
@@ -81,8 +83,10 @@ def model2numbers(ols_result):
     coef_est = coef_est[coef_names_subset_ind]
     pvalues = pvalues[coef_names_subset_ind]
     CI = CI.loc[coef_names]
+    
+    coef_pd = pd.DataFrame({"coef_names":coef_names, "coef_est":coef_est, "pvalues":pvalues})
 
-    return ols_result.params, coef_names, coef_est, pvalues, CI#, yerr
+    return coef_pd, coef_names, coef_est, pvalues, CI#, yerr
 
 def get_savename(animal, output_folder, parameter_name_remote, minimum_duration_long, minimum_duration_remote, min_posterior,sd):
     output_path = os.path.join(output_folder,f"{animal}_{parameter_name_remote}_{minimum_duration_long}_{minimum_duration_remote}_{min_posterior}_sd{sd}_figure4Fa") #os.join(output_folder,plot_data_filename)

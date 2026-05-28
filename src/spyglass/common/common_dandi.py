@@ -149,23 +149,26 @@ class DandiPath(SpyglassMixin, dj.Manual):
 
         # check if pre-existing directories for dandi export exist.
         # Remove if so to continue
-        for dandi_dir in destination_dir, dandiset_dir:
-            if os.path.exists(dandi_dir):
-                if (
-                    dj.utils.user_choice(
-                        "Pre-existing dandi export dir exist."
-                        + f"Delete existing export folder: {dandi_dir}",
-                        default="no",
+        if n_compile_processes == 0:
+            pass
+        else:
+            for dandi_dir in destination_dir, dandiset_dir:
+                if os.path.exists(dandi_dir):
+                    if (
+                        dj.utils.user_choice(
+                            "Pre-existing dandi export dir exist."
+                            + f"Delete existing export folder: {dandi_dir}",
+                            default="no",
+                        )
+                        == "yes"
+                    ):
+                        shutil.rmtree(dandi_dir)
+                        continue
+                    raise RuntimeError(
+                        "Directory must be removed prior to dandi export to ensure "
+                        + f"dandi-compatability: {dandi_dir}"
                     )
-                    == "yes"
-                ):
-                    shutil.rmtree(dandi_dir)
-                    continue
-                raise RuntimeError(
-                    "Directory must be removed prior to dandi export to ensure "
-                    + f"dandi-compatability: {dandi_dir}"
-                )
-        os.makedirs(destination_dir, exist_ok=False)
+            os.makedirs(destination_dir, exist_ok=False)
 
         logger.info(
             f"Compiling dandiset in {destination_dir} from {len(source_files)} files"
@@ -173,6 +176,8 @@ class DandiPath(SpyglassMixin, dj.Manual):
         if n_compile_processes == 1:
             for file in source_files:
                 _make_file_in_dandi_dir(file, destination_dir, skip_raw_files)
+        elif n_compile_processes == 0:
+            pass  # skip compilation step and assume files are already in place. Used for testing
         else:
             from multiprocessing import Pool
 
@@ -189,12 +194,13 @@ class DandiPath(SpyglassMixin, dj.Manual):
                 )
 
         # validate the dandiset
-        logger.info("Validating dandiset before organization")
-        validate_dandiset(
-            destination_dir,
-            ignore_external_files=True,
-            n_processes=n_validate_processes,
-        )
+        if n_validate_processes > 1:
+            logger.info("Validating dandiset before organization")
+            validate_dandiset(
+                destination_dir,
+                ignore_external_files=True,
+                n_processes=n_validate_processes,
+            )
 
         # given dandiset_id, download the dandiset to the export_dir
         url = (
@@ -204,17 +210,18 @@ class DandiPath(SpyglassMixin, dj.Manual):
         dandi.download.download(url, output_dir=paper_dir)
 
         # organize the files in the dandiset directory
-        logger.info("Organizing dandiset")
-        dandi.organize.organize(
-            destination_dir,
-            dandiset_dir,
-            update_external_file_paths=True,
-            invalid=OrganizeInvalid.FAIL,
-            media_files_mode=CopyMode.SYMLINK,
-            files_mode=FileOperationMode.COPY,
-            jobs=n_organize_processes,
-        )
-        logger.info("ORGANIZATION COMPLETE")
+        if n_organize_processes > 1:
+            logger.info("Organizing dandiset")
+            dandi.organize.organize(
+                destination_dir,
+                dandiset_dir,
+                update_external_file_paths=True,
+                invalid=OrganizeInvalid.FAIL,
+                media_files_mode=CopyMode.SYMLINK,
+                files_mode=FileOperationMode.COPY,
+                jobs=n_organize_processes,
+            )
+            logger.info("ORGANIZATION COMPLETE")
 
         # upload the dandiset to the dandi server
         logger.info("Uploading dandiset")

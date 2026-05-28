@@ -7,6 +7,9 @@ import seaborn as sns
 import sortingview.views as vv
 import xarray as xr
 from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import Normalize
 from ripple_detection import get_multiunit_population_firing_rate
 from tqdm.auto import tqdm
 
@@ -58,6 +61,28 @@ def setup_figure():
     )
 
     axes[0].add_artist(scalebar)
+    # Position the colorbar axes as an inset that tracks the main axes automatically.
+    # Left edge at axes-coord x=-0.3 (same as legend's bbox_to_anchor in render_frame),
+    # 25% height (half of previous), vertically centered.
+    cbar_ax = inset_axes(
+        axes[0],
+        width="3%",
+        height="25%",
+        loc="center left",
+        bbox_to_anchor=(-0.235, 0, 1, 1),
+        bbox_transform=axes[0].transAxes,
+        borderpad=0,
+    )
+    cbar_ax.set_facecolor("black")
+    cbar_ax.tick_params(colors="white", labelsize=8)
+    for spine in cbar_ax.spines.values():
+        spine.set_color("white")
+    # Create the colorbar ONCE with a fixed mappable so it doesn't flicker / get recreated per frame.
+    sm = ScalarMappable(norm=Normalize(vmin=0.0, vmax=0.06), cmap="viridis")
+    sm.set_array([])
+    cbar = fig.colorbar(sm, cax=cbar_ax, orientation="vertical")
+    cbar.ax.tick_params(colors="white", labelsize=8)
+
     axes[0].axis("off")
     axes[0].invert_yaxis()
 
@@ -82,7 +107,7 @@ def setup_figure():
     
     print("finished setting up")
     
-    return fig, {'main': axes[0], 'MUA': axes[1], 'state': axes[2]}
+    return fig, {'main': axes[0], 'main_cbar': cbar_ax, 'MUA': axes[1], 'state': axes[2]}
 
             
 def render_frame(fig, axes, time_ind, data):
@@ -98,6 +123,7 @@ def render_frame(fig, axes, time_ind, data):
     rate = data["rate"]
     state_posterior = data["state_posterior"]
     posterior_coords = data["posterior_coords"]
+    video_slowdown = data.get("video_slowdown", None)
     
     
     
@@ -111,6 +137,7 @@ def render_frame(fig, axes, time_ind, data):
             position[time_ind][0],
             position[time_ind][1],
             s=80,
+            alpha = 0.7,
             zorder=102,
             color="magenta",
             label="actual position",
@@ -128,14 +155,15 @@ def render_frame(fig, axes, time_ind, data):
             position[time_ind, 1],
             position[time_ind, 1] + r * np.sin(direction[time_ind]),
             ],
+            alpha = 0.7,
             color="magenta", linewidth=5, #animated=True
         )
     
     
     
     
-    (map_line,) = axes["main"].plot(map_position[time_slice, 0],
-                                    map_position[time_slice, 1], "green", linewidth=3)
+    # (map_line,) = axes["main"].plot(map_position[time_slice, 0],
+    #                                 map_position[time_slice, 1], "green", linewidth=3)
     
     # 2D posterior
     posterior = xr.DataArray(posterior_np, coords = posterior_coords, dims=("time", "x_position","y_position"))
@@ -145,10 +173,13 @@ def render_frame(fig, axes, time_ind, data):
             y="y_position",
             vmin=0.0,
             vmax=0.06,
+            cmap="viridis",
             ax=axes["main"],
             add_colorbar=False,
         )
-    
+    # Colorbar is created once in setup_figure with a fixed ScalarMappable, so it does not
+    # need to be recreated each frame. This avoids flicker and ensures it appears on frame 0.
+
     t0 = np.array(posterior.time)[0]
     t_now = posterior.isel(time=time_ind).time.values - t0
     axes["main"].set_title(
@@ -187,8 +218,32 @@ def render_frame(fig, axes, time_ind, data):
         22, #position_info[position_name[1]].min() - 10,
         247#position_info[position_name[1]].max() + 10,
     )
+    axes['main'].set_aspect('equal', adjustable='box')
+
+    scalebar = AnchoredSizeBar(
+            axes['main'].transData,
+            30,
+            "30 cm",
+            "lower right",
+            pad=0.1,
+            color="white",
+            frameon=False,
+            size_vertical=1,
+            fontproperties=fm.FontProperties(size=12),
+    )
+    axes['main'].add_artist(scalebar)
+    if video_slowdown is not None:
+        axes['main'].text(
+            0.98,
+            0.95,
+            f"x{video_slowdown} slowed down",
+            transform=axes['main'].transAxes,
+            ha="right",
+            va="bottom",
+            color="white",
+            fontsize=10,
+        )
     
-    #axes['main'].add_artist(scalebar)
     axes['main'].axis("off")
     axes['main'].invert_yaxis()
 
@@ -209,9 +264,19 @@ def render_frame(fig, axes, time_ind, data):
                 map_position[time_ind, 1],
                 s=80,
                 zorder=102,
+                alpha = 0.7,
                 color="green",
-                label="decoded position",
+                label="decoded position (MAP)",
         )
+    legend = axes["main"].legend(
+            loc="lower left",
+            bbox_to_anchor=(-0.3, 0.1),
+            bbox_transform=axes["main"].transAxes,
+            facecolor="black",
+            edgecolor="black",
+        )
+    for text in legend.get_texts():
+        text.set_color("white")
         
 
     axes['state'].set_ylim((0.0, 1))
@@ -332,6 +397,7 @@ def make_single_environment_movie(
             "map_position":map_position,
             "rate":rate,
             "state_posterior":state_posterior,
+            "video_slowdown": video_slowdown,
             #"posterior_time":state_posterior_time,
             }
     

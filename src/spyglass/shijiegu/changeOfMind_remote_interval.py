@@ -477,6 +477,22 @@ def find_remote_theta_interval(triggered_position,triggered_position_abs,trigger
     
     is_remote = np.logical_and(is_remote, is_moving)
     
+    if min_sum_posterior == 0:
+        # if no posterior threshold, there will be no continuity and state requirement,
+        trials = [trialID]
+        arm_identity = [0,1,2,3,4] # all arms including home arm
+        time_intervals = []
+        # for each region, count the number of time bins that the max posterior position falls into that region,
+        for k in [5,6,7,8,9]:
+            (arm_base, arm_top) = region[k]
+            time_in_arm = np.logical_and(max_posterior_position <= arm_top, max_posterior_position >= arm_base)
+            time_in_arm = time_in_arm[:min_len]
+            time_in_arm = np.logical_and(time_in_arm, is_remote)
+            delta_t = np.sum(time_in_arm) * np.median(np.diff(posterior_position_subset.time))
+            t0 = float(posterior_position_subset.time[0])
+            time_intervals.append((t0, t0 + delta_t))
+        return trials, time_intervals, arm_identity
+    
     is_remote_pd = pd.Series(is_remote, index = posterior_position_subset.time)
     is_remote_segments = np.array(segment_boolean_series(
             is_remote_pd, minimum_duration=minimum_duration))
@@ -489,6 +505,8 @@ def find_remote_theta_interval(triggered_position,triggered_position_abs,trigger
     arm_identity = []
     trials = []
     
+    
+
             
     for i in range(is_remote_segments.shape[0]):
         
