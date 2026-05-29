@@ -54,7 +54,7 @@ dependencies = [
     "position_tools>=0.1.0",
     "pubnub<6.4.0",                  # TODO: remove this when sortingview is updated
     "pydotplus",
-    "pynwb>=2.2.0,<3",
+    "pynwb>=2.2.0",
     "ripple_detection",
     "seaborn",
     "sortingview>=0.11",
