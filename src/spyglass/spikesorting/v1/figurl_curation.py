@@ -2,7 +2,7 @@ import uuid
 from typing import Any, Dict, List, Union
 
 import datajoint as dj
-import kachery_cloud as kcl
+#import kachery_cloud as kcl
 import pynwb
 import sortingview.views as vv
 import spikeinterface as si
