@@ -1,7 +1,7 @@
 import os
 
 import datajoint as dj
-import kachery_cloud as kcl
+#import kachery_cloud as kcl
 from datajoint.errors import DataJointError
 
 from spyglass.common.common_lab import Lab  # noqa: F401
